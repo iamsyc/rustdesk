@@ -158,10 +158,12 @@ jobs:
       - name: Verify and ad-hoc sign application
         run: |
           APP="flutter/build/macos/Build/Products/Release/RustDesk.app"
+          LIB="${APP}/Contents/Frameworks/liblibrustdesk.dylib"
           test -d "${APP}"
-          ARCHS="$(lipo -archs "${APP}/Contents/MacOS/RustDesk")"
+          test -f "${LIB}"
+          ARCHS="$(lipo -archs "${LIB}")"
           [[ " ${ARCHS} " == *" x86_64 "* ]]
-          grep -aFq 'macOS keyboard event tap was disabled' "${APP}/Contents/MacOS/RustDesk"
+          grep -aFq 'macOS keyboard event tap was disabled' "${LIB}"
           codesign --force --deep --sign - "${APP}"
           codesign --verify --deep --strict --verbose=2 "${APP}"
 

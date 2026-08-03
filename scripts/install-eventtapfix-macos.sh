@@ -46,7 +46,7 @@ if [[ ! -d "${SOURCE_APP}" ]]; then
   exit 65
 fi
 
-SOURCE_BIN="${SOURCE_APP}/Contents/MacOS/RustDesk"
+SOURCE_BIN="${SOURCE_APP}/Contents/Frameworks/liblibrustdesk.dylib"
 ARCHS="$(lipo -archs "${SOURCE_BIN}")"
 [[ " ${ARCHS} " == *" x86_64 "* ]]
 grep -aFq "macOS keyboard event tap was disabled" "${SOURCE_BIN}"
