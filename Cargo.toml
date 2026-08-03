@@ -209,6 +209,9 @@ exclude = ["vdi/host", "examples/custom_plugin", "third_party/rdev"]
 [patch.crates-io]
 libxdo-sys = { path = "libs/libxdo-sys-stub" }
 
+[patch."https://github.com/rustdesk-org/rdev"]
+rdev = { path = "third_party/rdev" }
+
 [package.metadata.winres]
 LegalCopyright = "Copyright © 2026 Purslane Tech Pte. Ltd. All rights reserved."
 ProductName = "RustDesk"
