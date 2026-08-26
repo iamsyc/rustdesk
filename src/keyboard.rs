@@ -1590,10 +1590,8 @@ pub mod input_source {
         }
         #[cfg(target_os = "macos")]
         if !crate::platform::macos::is_can_input_monitoring(false) {
-            log::error!("init_input_source, is_can_input_monitoring() false");
-            set_local_option(
-                CONFIG_OPTION_INPUT_SOURCE.to_string(),
-                CONFIG_INPUT_SOURCE_2.to_string(),
+            log::error!(
+                "init_input_source, is_can_input_monitoring() false; preserving configured input source"
             );
             return;
         }
