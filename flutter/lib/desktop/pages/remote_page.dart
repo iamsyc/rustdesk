@@ -304,6 +304,18 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void _onMacOSFocusChange() {
+    // Input source 1 is backed by the native macOS Event Tap. Flutter's
+    // FocusNode can flap while the native window and remote canvas remain
+    // active, so it must not own the native grab lifecycle. Authoritative
+    // window/tab/pointer/overlay/lifecycle state is handled by the sync path.
+    // Input source 2 still depends on Flutter focus and keeps the old rules.
+    if (!isInputSourceFlutter) {
+      if (_rawKeyFocusNode.hasPrimaryFocus) {
+        _macOSExplicitFocusRequestPending = false;
+      }
+      _syncMacOSKeyboardGrab(allowInactiveLifecycle: true);
+      return;
+    }
     // requestFocus() notifies later; only a recorded explicit request may clear
     // the local-focus-loss latch.
     if (_rawKeyFocusNode.hasPrimaryFocus) {
@@ -377,7 +389,11 @@ class _RemotePageState extends State<RemotePage>
         _cursorOverImage.value &&
         !_macOSLocalFocusLost;
     final hasFocus = _rawKeyFocusNode.hasPrimaryFocus;
-    final shouldActivateInput = shouldFocus && hasFocus;
+    // Native Event Tap input does not require Flutter's FocusNode. The node can
+    // oscillate even while the native RustDesk window remains active. Flutter
+    // input source 2 still requires primary focus for raw key delivery.
+    final shouldActivateInput =
+        shouldFocus && (!isInputSourceFlutter || hasFocus);
 
     if (shouldActivateInput != _macOSInputActive ||
         (shouldActivateInput && reassert)) {
@@ -388,7 +404,7 @@ class _RemotePageState extends State<RemotePage>
     if (!shouldFocus) {
       _macOSExplicitFocusRequestPending = false;
       if (hasFocus) _rawKeyFocusNode.unfocus();
-    } else if (!hasFocus) {
+    } else if (!hasFocus && isInputSourceFlutter) {
       _macOSExplicitFocusRequestPending = allowInactiveLifecycle;
       _rawKeyFocusNode.requestFocus();
     } else {
