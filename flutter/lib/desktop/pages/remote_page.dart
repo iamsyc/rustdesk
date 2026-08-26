@@ -892,7 +892,20 @@ class _RemotePageState extends State<RemotePage>
 
     // See [onWindowBlur].
     if (isMacOS) {
-      _syncMacOSKeyboardGrab();
+      // PointerExit on macOS is not an authoritative keyboard-focus change.
+      // It may be emitted while the user is still typing into the focused
+      // remote canvas, which used to release the native Event Tap grab and
+      // leave every following key with hooked=false. Keep remote keyboard
+      // ownership until focus actually moves to local UI or the native window,
+      // tab, lifecycle, overlay, or suppression state becomes inactive.
+      final keepRemoteKeyboard = _macOSInputActive &&
+          _rawKeyFocusNode.hasPrimaryFocus &&
+          _isMacOSKeyboardContextActive &&
+          !_macOSInputSuppressed &&
+          _blockableOverlayState.middleBlocked.isFalse;
+      if (!keepRemoteKeyboard) {
+        _syncMacOSKeyboardGrab();
+      }
     } else if (!isWindows) {
       _ffi.inputModel.enterOrLeave(false);
     }
