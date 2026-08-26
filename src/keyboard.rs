@@ -39,18 +39,27 @@ static KEYBOARD_HOOKED: AtomicBool = AtomicBool::new(false);
 // macOS: Cmd+G (track G key)
 // Windows/Linux: Ctrl+Alt (track whichever modifier was pressed last)
 // This prevents the exit from retriggering on OS key-repeat.
-#[cfg(all(feature = "flutter", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "flutter",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 static EXIT_SHORTCUT_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 
 // Track whether relative mouse mode is currently active.
 // This is set by Flutter via set_relative_mouse_mode_state() and checked
 // by the rdev grab loop to determine if exit shortcuts should be processed.
-#[cfg(all(feature = "flutter", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "flutter",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 static RELATIVE_MOUSE_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Set the relative mouse mode state from Flutter.
 /// This is called when entering or exiting relative mouse mode.
-#[cfg(all(feature = "flutter", any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(all(
+    feature = "flutter",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
 pub fn set_relative_mouse_mode_state(active: bool) {
     RELATIVE_MOUSE_MODE_ACTIVE.store(active, Ordering::SeqCst);
     // Reset exit shortcut state when mode changes to avoid stale state
@@ -321,10 +330,16 @@ pub mod client {
     pub fn process_event(keyboard_mode: &str, event: &Event, lock_modes: Option<i32>) {
         let keyboard_mode = get_keyboard_mode_enum(keyboard_mode);
         if is_long_press(&event) {
+            log::debug!("[keyboard-diag] encode skipped=long-press");
             return;
         }
         let peer = get_peer_platform().to_lowercase();
-        for key_event in event_to_key_events(peer, &event, keyboard_mode, lock_modes) {
+        let key_events = event_to_key_events(peer, &event, keyboard_mode, lock_modes);
+        log::debug!(
+            "[keyboard-diag] encode generated_events={}",
+            key_events.len()
+        );
+        for key_event in key_events {
             send_key_event(&key_event);
         }
     }
@@ -577,10 +592,8 @@ fn should_block_relative_mouse_shortcut(key: Key, is_press: bool) -> bool {
     #[cfg(target_os = "macos")]
     let is_tracked_key = key == Key::KeyG;
     #[cfg(not(target_os = "macos"))]
-    let is_tracked_key = key == Key::ControlLeft
-        || key == Key::ControlRight
-        || key == Key::Alt
-        || key == Key::AltGr;
+    let is_tracked_key =
+        key == Key::ControlLeft || key == Key::ControlRight || key == Key::Alt || key == Key::AltGr;
 
     // Block key up if key down was blocked (to avoid orphan key up event on remote).
     // This must be checked before clearing the flag below.
@@ -627,7 +640,13 @@ fn start_grab_loop() {
                 return None;
             }
 
-            let res = if KEYBOARD_HOOKED.load(Ordering::SeqCst) {
+            let hooked = KEYBOARD_HOOKED.load(Ordering::SeqCst);
+            log::debug!(
+                "[keyboard-diag] capture direction={} hooked={}",
+                if is_press { "press" } else { "release" },
+                hooked
+            );
+            let res = if hooked {
                 client::process_event(&get_keyboard_mode(), &event, None);
                 if is_press {
                     None
@@ -997,8 +1016,12 @@ pub fn send_key_event(key_event: &KeyEvent) {
     }
 
     #[cfg(feature = "flutter")]
-    if let Some(session) = flutter::get_cur_session() {
-        session.send_key_event(key_event);
+    match flutter::get_cur_session() {
+        Some(session) => {
+            log::debug!("[keyboard-diag] send session=present");
+            session.send_key_event(key_event);
+        }
+        None => log::warn!("[keyboard-diag] send session=missing"),
     }
 }
 
