@@ -235,14 +235,17 @@ pub mod client {
                     return;
                 }
 
-                // Flutter can emit Wait while its FocusNode/lifecycle state
-                // flaps even though the native macOS remote-desktop window is
-                // still the active key window. AppKit is authoritative here.
-                // A real app/window switch fails this check and releases below.
+                // Keep the macOS Event Tap armed for the lifetime of the app.
+                // Flutter's focus/lifecycle callbacks are not reliable enough
+                // to own a native keyboard hook: after a Wait they may never
+                // send a matching Run when the remote window becomes active
+                // again. The Event Tap callback checks the native AppKit key
+                // window for every event, so local applications and non-remote
+                // RustDesk windows still receive their keys normally.
                 #[cfg(target_os = "macos")]
-                if crate::platform::macos::is_remote_desktop_key_window() {
+                {
                     log::debug!(
-                        "[grab] Wait(0x{:x}): ignored, native remote key window is active",
+                        "[grab] Wait(0x{:x}): ignored, native Event Tap remains armed",
                         session_id
                     );
                     return;
