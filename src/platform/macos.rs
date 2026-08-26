@@ -116,6 +116,37 @@ pub fn is_can_screen_recording(prompt: bool) -> bool {
     autoreleasepool(|| unsafe_is_can_screen_recording(prompt))
 }
 
+/// Returns whether the active AppKit key window is a RustDesk remote-desktop
+/// window. Flutter focus/lifecycle callbacks can flap while this native window
+/// remains active, so native Event Tap input uses this as the authoritative
+/// macOS boundary.
+pub fn is_remote_desktop_key_window() -> bool {
+    autoreleasepool(|| unsafe {
+        let app = NSApp();
+        if app.is_null() {
+            return false;
+        }
+        let active: BOOL = msg_send![app, isActive];
+        if active != YES {
+            return false;
+        }
+        let window: id = msg_send![app, keyWindow];
+        if window.is_null() {
+            return false;
+        }
+        let title: id = msg_send![window, title];
+        if title.is_null() {
+            return false;
+        }
+        let title_ptr: *const std::os::raw::c_char = msg_send![title, UTF8String];
+        if title_ptr.is_null() {
+            return false;
+        }
+        let title = std::ffi::CStr::from_ptr(title_ptr).to_string_lossy();
+        title.contains("Remote Desktop") && title.ends_with("RustDesk")
+    })
+}
+
 // macOS >= 10.15
 // https://stackoverflow.com/questions/56597221/detecting-screen-recording-settings-on-macos-catalina/
 // remove just one app from all the permissions: tccutil reset All com.carriez.rustdesk

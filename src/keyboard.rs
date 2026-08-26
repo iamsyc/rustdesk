@@ -235,6 +235,19 @@ pub mod client {
                     return;
                 }
 
+                // Flutter can emit Wait while its FocusNode/lifecycle state
+                // flaps even though the native macOS remote-desktop window is
+                // still the active key window. AppKit is authoritative here.
+                // A real app/window switch fails this check and releases below.
+                #[cfg(target_os = "macos")]
+                if crate::platform::macos::is_remote_desktop_key_window() {
+                    log::debug!(
+                        "[grab] Wait(0x{:x}): ignored, native remote key window is active",
+                        session_id
+                    );
+                    return;
+                }
+
                 // Debounce: on Linux/X11, XGrabKeyboard causes a focus-change
                 // feedback loop (grab -> PointerExit -> ungrab -> PointerEnter ->
                 // grab -> ...). Suppress Wait if the grab was acquired recently
@@ -640,7 +653,14 @@ fn start_grab_loop() {
                 return None;
             }
 
-            let hooked = KEYBOARD_HOOKED.load(Ordering::SeqCst);
+            let mut hooked = KEYBOARD_HOOKED.load(Ordering::SeqCst);
+            #[cfg(target_os = "macos")]
+            {
+                // Never consume local keys when another application or a
+                // non-remote RustDesk window is frontmost, even if Flutter left
+                // a stale grab bit behind.
+                hooked &= crate::platform::macos::is_remote_desktop_key_window();
+            }
             log::debug!(
                 "[keyboard-diag] capture direction={} hooked={}",
                 if is_press { "press" } else { "release" },
