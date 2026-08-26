@@ -1609,6 +1609,11 @@ pub mod input_source {
             return;
         }
         #[cfg(target_os = "macos")]
+        set_local_option(
+            CONFIG_OPTION_INPUT_SOURCE.to_string(),
+            CONFIG_INPUT_SOURCE_1.to_string(),
+        );
+        #[cfg(target_os = "macos")]
         if !crate::platform::macos::is_can_input_monitoring(false) {
             log::error!(
                 "init_input_source, is_can_input_monitoring() false; preserving configured input source"
@@ -1622,17 +1627,39 @@ pub mod input_source {
         super::client::start_grab_loop();
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn change_input_source(session_id: SessionID, input_source: String) {
+        if input_source != CONFIG_INPUT_SOURCE_1 {
+            log::warn!(
+                "change_input_source, ignoring unsupported macOS input source: {}",
+                input_source
+            );
+            set_local_option(
+                CONFIG_OPTION_INPUT_SOURCE.to_string(),
+                CONFIG_INPUT_SOURCE_1.to_string(),
+            );
+            return;
+        }
+        if !crate::platform::macos::is_can_input_monitoring(false) {
+            log::error!("change_input_source, is_can_input_monitoring() false");
+            return;
+        }
+        super::client::start_grab_loop();
+        super::IS_RDEV_ENABLED.store(true, super::Ordering::SeqCst);
+        crate::flutter_ffi::session_enter_or_leave(session_id, true);
+        set_local_option(
+            CONFIG_OPTION_INPUT_SOURCE.to_string(),
+            CONFIG_INPUT_SOURCE_1.to_string(),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn change_input_source(session_id: SessionID, input_source: String) {
         let cur_input_source = get_cur_session_input_source();
         if cur_input_source == input_source {
             return;
         }
         if input_source == CONFIG_INPUT_SOURCE_1 {
-            #[cfg(target_os = "macos")]
-            if !crate::platform::macos::is_can_input_monitoring(false) {
-                log::error!("change_input_source, is_can_input_monitoring() false");
-                return;
-            }
             // It is ok to start grab loop multiple times.
             super::client::start_grab_loop();
             super::IS_RDEV_ENABLED.store(true, super::Ordering::SeqCst);
@@ -1646,6 +1673,12 @@ pub mod input_source {
     }
 
     #[inline]
+    #[cfg(target_os = "macos")]
+    pub fn get_cur_session_input_source() -> String {
+        CONFIG_INPUT_SOURCE_1.to_string()
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn get_cur_session_input_source() -> String {
         #[cfg(target_os = "linux")]
         if !crate::platform::linux::is_x11() {
@@ -1660,6 +1693,15 @@ pub mod input_source {
     }
 
     #[inline]
+    #[cfg(target_os = "macos")]
+    pub fn get_supported_input_source() -> Vec<(String, String)> {
+        vec![(
+            CONFIG_INPUT_SOURCE_1.to_string(),
+            CONFIG_INPUT_SOURCE_1_TIP.to_string(),
+        )]
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn get_supported_input_source() -> Vec<(String, String)> {
         #[cfg(target_os = "linux")]
         if !crate::platform::linux::is_x11() {
