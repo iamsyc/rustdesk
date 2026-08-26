@@ -314,6 +314,35 @@ class _RemotePageState extends State<RemotePage>
       }
       _syncMacOSKeyboardGrab(allowInactiveLifecycle: explicitRequest);
     } else {
+      // Flutter can transiently drop the FocusNode while the native RustDesk
+      // window and remote canvas are still active. Releasing the native grab
+      // here makes every following Event Tap callback report hooked=false even
+      // though the user is still typing into the remote desktop. Keep the grab
+      // until an authoritative boundary (window blur, pointer exit, overlay,
+      // tab change, or explicit suppression) says remote input must stop.
+      final keepRemoteInput = _macOSInputActive &&
+          _isMacOSKeyboardContextActive &&
+          !_macOSInputSuppressed &&
+          _blockableOverlayState.middleBlocked.isFalse &&
+          _cursorOverImage.value;
+      if (keepRemoteInput) {
+        _macOSExplicitFocusRequestPending = true;
+        scheduleMicrotask(() {
+          if (!mounted) return;
+          final canRestore = _isMacOSKeyboardContextActive &&
+              !_macOSInputSuppressed &&
+              _blockableOverlayState.middleBlocked.isFalse &&
+              _cursorOverImage.value;
+          if (canRestore) {
+            _macOSLocalFocusLost = false;
+            _rawKeyFocusNode.requestFocus();
+          } else {
+            _macOSExplicitFocusRequestPending = false;
+            _syncMacOSKeyboardGrab();
+          }
+        });
+        return;
+      }
       if (_macOSInputActive) {
         _ffi.inputModel.enterOrLeave(false);
         _macOSInputActive = false;
