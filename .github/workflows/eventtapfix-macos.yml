@@ -122,7 +122,15 @@ jobs:
         run: |
           FLUTTER_ROOT="$(dirname "$(dirname "$(command -v flutter)")")"
           pushd "${FLUTTER_ROOT}"
-          git apply "${GITHUB_WORKSPACE}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          FLUTTER_PATCH="${GITHUB_WORKSPACE}/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff"
+          if git apply --check "${FLUTTER_PATCH}"; then
+            git apply "${FLUTTER_PATCH}"
+          elif git apply --reverse --check "${FLUTTER_PATCH}"; then
+            echo "Flutter dropdown patch is already applied in the action cache"
+          else
+            echo "Flutter dropdown patch does not match the installed SDK" >&2
+            exit 1
+          fi
           sed -i -e 's/_setFramesEnabledState(false);/\/\/_setFramesEnabledState(false);/g' packages/flutter/lib/src/scheduler/binding.dart
           popd
 
