@@ -1,8 +1,14 @@
-# RustDesk 1.4.9 macOS Event Tap recovery
+# RustDesk 1.5.0 macOS Event Tap recovery
 
 This build vendors RustDesk's pinned `rdev` dependency at commit
-`871bf1c856d6a30af2f56ab8848396a025140855` and changes only the macOS keyboard
-grab path.
+`a361d86a8b0245f3618a9efb375c149530a6b599` and retains the macOS keyboard
+grab and native-window focus fixes from the owner's 1.4.9 build.
+
+The official 1.5.0 tag is merged, including its matching rdev changes. Native
+Event Tap capture stays armed across Flutter focus-loss notifications, and each
+key is gated by the active AppKit remote-desktop window. Fullscreen/Space and
+tab-transfer recovery remain in the Flutter layer. Per-key diagnostics use trace
+logging so ordinary sessions do not write a line for every key event.
 
 ## Failure
 
@@ -26,11 +32,11 @@ RustDesk already uses this recovery pattern for its privacy-mode Event Tap in
 
 ## Build
 
-Run the **Build macOS Event Tap fix** workflow from GitHub Actions. It builds an
+Run the **Build macOS Event Tap and focus fix** workflow from GitHub Actions. It builds an
 Intel `x86_64` application with the same Rust, Flutter and vcpkg versions pinned
-by RustDesk 1.4.9, applies an ad-hoc signature, creates a DMG and uploads:
+by RustDesk 1.5.0, applies an ad-hoc signature, creates a DMG and uploads:
 
-* `RustDesk-EventTapFix-1.4.9-x86_64.dmg`
+* `RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg`
 * `SHA256SUMS.txt`
 
 The build is intentionally not notarized. It is intended only for installation
@@ -41,13 +47,14 @@ on the owner's Mac.
 Run:
 
 ```bash
-./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-EventTapFix-1.4.9-x86_64.dmg
+./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg
 ```
 
 The script verifies the checksum, architecture, embedded recovery log marker
 and code signature. It then moves the existing `/Applications/RustDesk.app` to
-a timestamped backup before installing the patched application. It resets the
-two relevant macOS privacy permissions, which must be granted again.
+a timestamped backup before installing the patched application. It preserves existing
+settings and privacy permissions. Check macOS permissions after launch; an
+ad-hoc signed replacement may require a new grant.
 
 To roll back, quit RustDesk, move the patched application elsewhere, and rename
 the timestamped backup to `/Applications/RustDesk.app`.

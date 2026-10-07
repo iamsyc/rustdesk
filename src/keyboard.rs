@@ -9,7 +9,7 @@ use crate::ui_session_interface::{InvokeUiSession, Session};
 use crate::{client::get_key_state, common::GrabState};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::log;
-use hbb_common::message_proto::*;
+use base::message_proto::*;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use rdev::KeyCode;
 use rdev::{Event, EventType, Key};
@@ -346,12 +346,12 @@ pub mod client {
     pub fn process_event(keyboard_mode: &str, event: &Event, lock_modes: Option<i32>) {
         let keyboard_mode = get_keyboard_mode_enum(keyboard_mode);
         if is_long_press(&event) {
-            log::debug!("[keyboard-diag] encode skipped=long-press");
+            log::trace!("[keyboard-diag] encode skipped=long-press");
             return;
         }
         let peer = get_peer_platform().to_lowercase();
         let key_events = event_to_key_events(peer, &event, keyboard_mode, lock_modes);
-        log::debug!(
+        log::trace!(
             "[keyboard-diag] encode generated_events={}",
             key_events.len()
         );
@@ -664,7 +664,7 @@ fn start_grab_loop() {
                 // a stale grab bit behind.
                 hooked &= crate::platform::macos::is_remote_desktop_key_window();
             }
-            log::debug!(
+            log::trace!(
                 "[keyboard-diag] capture direction={} hooked={}",
                 if is_press { "press" } else { "release" },
                 hooked
@@ -1041,7 +1041,7 @@ pub fn send_key_event(key_event: &KeyEvent) {
     #[cfg(feature = "flutter")]
     match flutter::get_cur_session() {
         Some(session) => {
-            log::debug!("[keyboard-diag] send session=present");
+            log::trace!("[keyboard-diag] send session=present");
             session.send_key_event(key_event);
         }
         None => log::warn!("[keyboard-diag] send session=missing"),

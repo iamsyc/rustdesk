@@ -13,7 +13,7 @@ env:
   MAC_RUST_VERSION: "1.81"
   BRIDGE_FLUTTER_VERSION: "3.22.3"
   FLUTTER_VERSION: "3.24.5"
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
@@ -40,7 +40,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: eventtapfix-bridge
+          prefix-key: eventtapfix-bridge-1.5.0
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
@@ -144,7 +144,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: eventtapfix-macos-intel
+          prefix-key: eventtapfix-macos-intel-1.5.0
 
       - name: Restore bridge
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -162,6 +162,17 @@ jobs:
         run: |
           "${VCPKG_ROOT}/vcpkg" install --x-install-root="${VCPKG_ROOT}/installed"
 
+      - name: Test Event Tap recovery notifications
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable test --manifest-path third_party/rdev/Cargo.toml --lib recognizes_event_tap_disable_notifications
+
+      - name: Test Flutter input and cursor regressions
+        working-directory: flutter
+        run: |
+          flutter pub get
+          flutter test --timeout 60s test/input_modifier_utils_test.dart test/cursor_size_test.dart test/cursor_replay_test.dart test/cursor_default_test.dart
+
       - name: Compile patched RustDesk
         run: |
           ./build.py --flutter --hwcodec --unix-file-copy-paste
@@ -172,16 +183,19 @@ jobs:
           LIB="${APP}/Contents/Frameworks/liblibrustdesk.dylib"
           test -d "${APP}"
           test -f "${LIB}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")" = "1.5.0"
           ARCHS="$(lipo -archs "${LIB}")"
           [[ " ${ARCHS} " == *" x86_64 "* ]]
           grep -aFq 'macOS keyboard event tap was disabled' "${LIB}"
-          codesign --force --deep --sign - "${APP}"
+          grep -aFq 'native Event Tap remains armed' "${LIB}"
+          grep -aFq 'ignoring unsupported macOS input source' "${LIB}"
+          codesign --force --deep --sign - --entitlements flutter/macos/Runner/Release.entitlements "${APP}"
           codesign --verify --deep --strict --verbose=2 "${APP}"
 
       - name: Package DMG
         run: |
           APP="flutter/build/macos/Build/Products/Release/RustDesk.app"
-          DMG="RustDesk-EventTapFocusFix-1.4.9-x86_64.dmg"
+          DMG="RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg"
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "${CREATE_DMG}")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "${CREATE_DMG}"
@@ -196,8 +210,8 @@ jobs:
       - name: Upload patched DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: RustDesk-EventTapFocusFix-1.4.9-x86_64
+          name: RustDesk-EventTapFocusFix-1.5.0-x86_64
           path: |
-            RustDesk-EventTapFocusFix-1.4.9-x86_64.dmg
+            RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg
             SHA256SUMS.txt
           retention-days: 14
