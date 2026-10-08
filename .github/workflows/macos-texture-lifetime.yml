@@ -5,6 +5,11 @@ on:
     branches:
       - 'codex/macos-texture-lifetime-*'
   workflow_dispatch:
+    inputs:
+      use_cached_engine:
+        description: Validate and package the engine already compiled by run 37748503003
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -16,10 +21,12 @@ concurrency:
 
 jobs:
   engine-and-package:
+    if: ${{ !inputs.use_cached_engine }}
     runs-on: macos-15-intel
     timeout-minutes: 240
     env:
       ENGINE_BUILD_JOBS: '3'
+      ENGINE_BUILD_GITHUB_RUN: ${{ github.run_id }}
     steps:
       - name: Checkout experiment source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -122,3 +129,111 @@ jobs:
             ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/args.gn
           if-no-files-found: ignore
           retention-days: 14
+
+  validate-cached-engine:
+    if: ${{ inputs.use_cached_engine }}
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    env:
+      ENGINE_BUILD_GITHUB_RUN: '37748503003'
+    steps:
+      - name: Checkout experiment source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Verify successful compilation and identical engine inputs
+        id: provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "ENGINE_WORKSPACE=$RUNNER_TEMP/rustdesk-flutter-engine" >> "$GITHUB_ENV"
+          python3 - <<'PYTHON'
+          import base64, json, pathlib, subprocess
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+          repo = 'repos/iamsyc/rustdesk'
+          run = api(repo + '/actions/runs/37748503003')
+          assert run['head_sha'] == '4bda22461d9c30a20fe6512a261f9b8c3ff04c11'
+          jobs = api(repo + '/actions/runs/37748503003/jobs')['jobs']
+          assert any(step['name'] == 'Preflight modified sources and compile Flutter engine'
+                     and step['conclusion'] == 'success'
+                     for job in jobs for step in job['steps'])
+          for path in ['scripts/build-macos-texture-engine.sh',
+                       '.github/patches/flutter-engine-3.24.5-macos-texture-lifetime.diff']:
+              original = api(repo + '/contents/' + path + '?ref=' + run['head_sha'])
+              assert base64.b64decode(original['content']) == pathlib.Path(path).read_bytes(), path
+          print('Reusing the completed build from run 37748503003 with identical engine inputs')
+          PYTHON
+
+      - name: Restore exact completed engine build
+        id: restore
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.ENGINE_WORKSPACE }}/src/out
+          key: texture-engine-a18df97-intel-a8be4f9af0a2-f56ce415b5d2ac576554a6262e1ba14b070e534a9c09a132cb0b88c80dca6d46
+          fail-on-cache-miss: true
+
+      - name: Prepare the pinned API header for the native probe
+        run: |
+          mkdir -p "$ENGINE_WORKSPACE/src/flutter/shell/platform/embedder"
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/flutter/engine/a18df97ca57a249df5d8d68cd0820600223ce262/shell/platform/embedder/embedder.h \
+            -o "$ENGINE_WORKSPACE/src/flutter/shell/platform/embedder/embedder.h"
+          git init -q "$ENGINE_WORKSPACE/src/flutter"
+          git -C "$ENGINE_WORKSPACE/src/flutter" apply \
+            --include=shell/platform/embedder/embedder.h \
+            "$GITHUB_WORKSPACE/.github/patches/flutter-engine-3.24.5-macos-texture-lifetime.diff"
+
+      - name: Run ownership tests and portable Metal readback
+        timeout-minutes: 5
+        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE" test
+
+      - name: Archive compiled engine for local GPU validation
+        if: always() && steps.restore.outputs.cache-hit == 'true' && steps.provenance.conclusion == 'success'
+        run: |
+          python3 - <<'PYTHON'
+          import os, pathlib, subprocess
+          workspace = pathlib.Path(os.environ['ENGINE_WORKSPACE'])
+          output = workspace / 'src/out/host_release'
+          names = ['FlutterMacOS.framework', 'flutter_desktop_darwin_unittests']
+          names += [path.name for pattern in ('*.dat', '*.dylib', 'flutter_desktop_darwin_fixtures')
+                    for path in output.glob(pattern)]
+          subprocess.run(['tar', '-czf', 'compiled-engine.tgz', '-C', str(output), *names,
+                          '-C', str(workspace / 'src/flutter'),
+                          'shell/platform/embedder/embedder.h'], check=True)
+          PYTHON
+
+      - name: Upload compiled engine and diagnostics
+        if: always() && steps.restore.outputs.cache-hit == 'true' && steps.provenance.conclusion == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: texture-compiled-engine
+          path: |
+            compiled-engine.tgz
+            ${{ env.ENGINE_WORKSPACE }}/texture-tests.xml
+            ${{ env.ENGINE_WORKSPACE }}/metal-probe.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Download exact 1.5.0 baseline
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: RustDesk-EventTapFocusFix-1.5.0-x86_64
+          path: baseline
+          run-id: 37577650499
+          github-token: ${{ github.token }}
+
+      - name: Package original and patched comparison DMGs
+        run: |
+          bash scripts/package-macos-texture-experiment.sh \
+            baseline/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg \
+            "$ENGINE_WORKSPACE/src/out/host_release/FlutterMacOS.framework" \
+            texture-experiment
+          cp "$ENGINE_WORKSPACE/metal-probe.json" "$ENGINE_WORKSPACE/texture-tests.xml" texture-experiment/
+
+      - name: Upload comparison packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: RustDesk-TextureLifetimeExperiment-1.5.0-x86_64
+          path: texture-experiment/
+          retention-days: 30
+          if-no-files-found: error

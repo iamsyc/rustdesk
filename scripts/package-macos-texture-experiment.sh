@@ -48,6 +48,7 @@ cp "$repo_dir/TEXTURE_LIFETIME_EXPERIMENT.md" "$output_dir/README.md"
 python3 - "$repo_dir" "$framework_dir" "$output_dir" <<'PY'
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -61,6 +62,7 @@ manifest = {
     "engine_revision": "a18df97ca57a249df5d8d68cd0820600223ce262",
     "baseline_source_commit": "59f1a6ba23dc8028a675b94e25838fdbc96c7abe",
     "baseline_github_run": 37577650499,
+    "engine_build_github_run": int(os.environ.get("ENGINE_BUILD_GITHUB_RUN", "0")) or None,
     "patch_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
     "engine_patch_sha256": sha256(repo / ".github/patches/flutter-engine-3.24.5-macos-texture-lifetime.diff"),
     "patched_framework_sha256": sha256(framework / "Versions/A/FlutterMacOS"),

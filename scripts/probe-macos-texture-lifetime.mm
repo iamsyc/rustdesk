@@ -100,10 +100,13 @@ int main(int argc, char** argv) {
     id<MTLTexture> source = (__bridge id<MTLTexture>)frame.textures[0];
     holder = nil;
     provider = nil;
-    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:16 height:16 mipmapped:NO];
-    descriptor.storageMode = MTLStorageModeShared;
-    id<MTLTexture> destination = [context.device newTextureWithDescriptor:descriptor];
+    // Discrete GPUs need a managed readback buffer synchronized to the CPU.
+    constexpr size_t readbackStride = 256;
+    MTLResourceOptions readbackOptions = context.device.hasUnifiedMemory
+                                            ? MTLResourceStorageModeShared
+                                            : MTLResourceStorageModeManaged;
+    id<MTLBuffer> destination = [context.device newBufferWithLength:readbackStride * 16
+                                                          options:readbackOptions];
     id<MTLCommandQueue> queue = [context.device newCommandQueue];
     id<MTLCommandBuffer> command = [queue commandBuffer];
     if (!source || !destination || !command) {
@@ -111,25 +114,38 @@ int main(int argc, char** argv) {
       return Failure("metal_command_creation_failed");
     }
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!blit) {
+      frame.destruction_callback(frame.user_data);
+      return Failure("metal_blit_creation_failed");
+    }
     [blit copyFromTexture:source sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
-              sourceSize:MTLSizeMake(16, 16, 1) toTexture:destination destinationSlice:0
-        destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+              sourceSize:MTLSizeMake(16, 16, 1) toBuffer:destination destinationOffset:0
+        destinationBytesPerRow:readbackStride destinationBytesPerImage:readbackStride * 16];
+    if (destination.storageMode == MTLStorageModeManaged) {
+      [blit synchronizeResource:destination];
+    }
     [blit endEncoding];
     [command commit];
     [command waitUntilCompleted];
     bool completed = command.status == MTLCommandBufferStatusCompleted;
-    unsigned char pixels[16 * 16 * 4] = {};
-    if (completed) {
-      [destination getBytes:pixels bytesPerRow:16 * 4 fromRegion:MTLRegionMake2D(0, 0, 16, 16)
-                      mipmapLevel:0];
-    }
+    auto* pixels = static_cast<const unsigned char*>(destination.contents);
     frame.destruction_callback(frame.user_data);
     if (!completed) {
       return Failure("gpu_command_failed");
     }
-    for (size_t i = 0; i < sizeof(pixels); i += 4) {
-      if (pixels[i] != 0 || pixels[i + 1] != 0 || pixels[i + 2] != 255 || pixels[i + 3] != 255) {
-        return Failure("gpu_pixel_mismatch");
+    if (!pixels) {
+      return Failure("readback_mapping_failed");
+    }
+    for (size_t y = 0; y < 16; ++y) {
+      for (size_t x = 0; x < 16; ++x) {
+        size_t i = y * readbackStride + x * 4;
+        if (pixels[i] != 0 || pixels[i + 1] != 0 || pixels[i + 2] != 255 || pixels[i + 3] != 255) {
+          fprintf(stderr, "GPU=%s format=%lu source_storage=%lu pixel[%zu,%zu]=%u,%u,%u,%u\n",
+                  context.device.name.UTF8String, (unsigned long)source.pixelFormat,
+                  (unsigned long)source.storageMode, x, y, pixels[i], pixels[i + 1],
+                  pixels[i + 2], pixels[i + 3]);
+          return Failure("gpu_pixel_mismatch");
+        }
       }
     }
     printf("{\"ok\":true,\"gpu_pixels\":256,\"released_after_gpu_completion\":true}\n");
