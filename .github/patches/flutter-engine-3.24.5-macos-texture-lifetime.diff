@@ -1,0 +1,289 @@
+diff --git a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
+index 683d515..72d8671 100644
+--- a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
++++ b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
+@@ -27,6 +27,22 @@
+                             width:(size_t)width
+                            height:(size_t)height;
+
+++ (sk_sp<SkImage>)wrapRGBATexture:(nonnull id<MTLTexture>)rgbaTex
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*_Nonnull)(void*))releaseProc
++                   releaseContext:(nullable void*)releaseContext;
++
+++ (sk_sp<SkImage>)wrapYUVATexture:(nonnull id<MTLTexture>)yTex
++                            UVTex:(nonnull id<MTLTexture>)uvTex
++                    YUVColorSpace:(SkYUVColorSpace)colorSpace
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*_Nonnull)(void*))releaseProc
++                   releaseContext:(nullable void*)releaseContext;
++
+ @end
+
+ @interface FlutterDarwinExternalTextureMetal : NSObject
+diff --git a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
+index b08430c..de3d0ea 100644
+--- a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
++++ b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
+@@ -341,4 +341,52 @@ GrYUVABackendTextures yuvaBackendTextures(yuvaInfo, skiaBackendTextures,
+                                      /*releaseContext*/ nullptr);
+ #endif  //  SLIMPELLER
+ }
++
+++ (sk_sp<SkImage>)wrapRGBATexture:(id<MTLTexture>)rgbaTex
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*)(void*))releaseProc
++                   releaseContext:(void*)releaseContext {
++#if SLIMPELLER
++  releaseProc(releaseContext);
++  return nullptr;
++#else
++  GrMtlTextureInfo textureInfo;
++  textureInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)rgbaTex};
++  GrBackendTexture backendTexture =
++      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, textureInfo);
++  return SkImages::BorrowTextureFrom(grContext, backendTexture, kTopLeft_GrSurfaceOrigin,
++                                    kBGRA_8888_SkColorType, kPremul_SkAlphaType, nullptr,
++                                    releaseProc, releaseContext);
++#endif
++}
++
+++ (sk_sp<SkImage>)wrapYUVATexture:(id<MTLTexture>)yTex
++                            UVTex:(id<MTLTexture>)uvTex
++                    YUVColorSpace:(SkYUVColorSpace)colorSpace
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*)(void*))releaseProc
++                   releaseContext:(void*)releaseContext {
++#if SLIMPELLER
++  releaseProc(releaseContext);
++  return nullptr;
++#else
++  GrMtlTextureInfo yInfo;
++  yInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)yTex};
++  GrMtlTextureInfo uvInfo;
++  uvInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)uvTex};
++  GrBackendTexture textures[2] = {
++      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, yInfo),
++      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, uvInfo),
++  };
++  SkYUVAInfo yuvaInfo(textures[0].dimensions(), SkYUVAInfo::PlaneConfig::kY_UV,
++                     SkYUVAInfo::Subsampling::k444, colorSpace);
++  GrYUVABackendTextures backendTextures(yuvaInfo, textures, kTopLeft_GrSurfaceOrigin);
++  return SkImages::TextureFromYUVATextures(grContext, backendTextures, nullptr,
++                                         releaseProc, releaseContext);
++#endif
++}
+ @end
+diff --git a/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm b/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
+index 1d0a656..2a6b4c2 100644
+--- a/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
++++ b/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
+@@ -334,4 +334,73 @@ - (CVPixelBufferRef)pixelBuffer {
+   texture->Paint(context, bounds, /*freeze=*/false, sampling);
+ }
+
++TEST_F(FlutterEmbedderExternalTextureTest, RejectingFrameReleasesResources) {
++  int releases = 0;
++  EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t, size_t) {
++    auto frame = std::make_unique<FlutterMetalExternalTexture>();
++    frame->struct_size = sizeof(FlutterMetalExternalTexture);
++    frame->pixel_format = FlutterMetalExternalTexturePixelFormat::kRGBA;
++    frame->user_data = &releases;
++    frame->destruction_callback = [](void* data) { ++*static_cast<int*>(data); };
++    return frame;
++  };
++  auto surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(16, 16));
++  DlSkCanvasAdapter canvas(surface->getCanvas());
++  flutter::Texture::PaintContext context{.canvas = &canvas};
++  std::unique_ptr<flutter::Texture> texture =
++      std::make_unique<EmbedderExternalTextureMetal>(1, callback);
++  texture->Paint(context, SkRect::MakeWH(16, 16), false, DlImageSampling::kNearestNeighbor);
++  EXPECT_EQ(releases, 1);
++  texture.reset();
++  EXPECT_EQ(releases, 1);
++}
++
++TEST_F(FlutterEmbedderExternalTextureTest, FrameResourcesSurvivePendingGPUDraw) {
++  if (!MTLCreateSystemDefaultDevice()) {
++    GTEST_SKIP() << "Metal device is unavailable";
++  }
++  FlutterDarwinContextMetalSkia* metal =
++      [[FlutterDarwinContextMetalSkia alloc] initWithDefaultMTLDevice];
++  GrDirectContext* gr = metal.mainContext.get();
++  auto surface = SkSurfaces::RenderTarget(gr, skgpu::Budgeted::kNo,
++                                         SkImageInfo::MakeN32Premul(16, 16));
++  ASSERT_NE(surface, nullptr);
++  TestExternalTexture* provider =
++      [[TestExternalTexture alloc] initWidth:16 height:16 pixelFormatType:kCVPixelFormatType_32BGRA];
++  FlutterExternalTexture* holder =
++      [[FlutterExternalTexture alloc] initWithFlutterTexture:provider darwinMetalContext:metal];
++  auto releases = std::make_shared<int>(0);
++  struct FrameRelease {
++    VoidCallback callback;
++    void* data;
++    std::shared_ptr<int> releases;
++  };
++  EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t, size_t) {
++    auto frame = std::make_unique<FlutterMetalExternalTexture>();
++    EXPECT_TRUE([holder populateTexture:frame.get()]);
++    EXPECT_NE(frame->destruction_callback, nullptr);
++    if (frame->destruction_callback) {
++      frame->user_data = new FrameRelease{frame->destruction_callback, frame->user_data, releases};
++      frame->destruction_callback = [](void* data) {
++        std::unique_ptr<FrameRelease> owner(static_cast<FrameRelease*>(data));
++        ++*owner->releases;
++        owner->callback(owner->data);
++      };
++    }
++    return frame;
++  };
++  std::unique_ptr<flutter::Texture> texture =
++      std::make_unique<EmbedderExternalTextureMetal>(1, callback);
++  DlSkCanvasAdapter canvas(surface->getCanvas());
++  flutter::Texture::PaintContext context{.canvas = &canvas, .gr_context = gr};
++  texture->Paint(context, SkRect::MakeWH(16, 16), false, DlImageSampling::kNearestNeighbor);
++  texture->MarkNewFrameAvailable();
++  texture.reset();
++  EXPECT_EQ(*releases, 0);
++  gr->flushAndSubmit(GrSyncCpu::kYes);
++  surface.reset();
++  gr->freeGpuResources();
++  EXPECT_EQ(*releases, 1);
++}
++
+ }  // namespace flutter::testing
+diff --git a/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm b/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
+index e15cd4e..81ab071 100644
+--- a/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
++++ b/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
+@@ -6,6 +6,17 @@
+
+ #include "flutter/fml/platform/darwin/cf_utils.h"
+
++namespace {
++struct ExternalTextureFrame {
++  fml::CFRef<CVMetalTextureRef> metal_texture;
++  fml::CFRef<CVPixelBufferRef> pixel_buffer;
++};
++
++void ReleaseExternalTextureFrame(void* context) {
++  delete static_cast<ExternalTextureFrame*>(context);
++}
++}  // namespace
++
+ @implementation FlutterExternalTexture {
+   FlutterDarwinContextMetalSkia* _darwinMetalContext;
+
+@@ -132,13 +143,18 @@ - (BOOL)populateTextureFromRGBAPixelBuffer:(nonnull CVPixelBufferRef)pixelBuffer
+   }
+
+   _textures = {(__bridge FlutterMetalTextureHandle)CVMetalTextureGetTexture(cvMetalTexture)};
+-  CVBufferRelease(cvMetalTexture);
++  // Retaining only id<MTLTexture> does not keep its Core Video backing alive.
++  auto* frame = new ExternalTextureFrame{fml::CFRef<CVMetalTextureRef>(cvMetalTexture),
++                                         fml::CFRef<CVPixelBufferRef>(CVPixelBufferRetain(pixelBuffer))};
+
++  textureOut->struct_size = sizeof(FlutterMetalExternalTexture);
+   textureOut->num_textures = 1;
+   textureOut->height = textureSize.height();
+   textureOut->width = textureSize.width();
+   textureOut->pixel_format = FlutterMetalExternalTexturePixelFormat::kRGBA;
+   textureOut->textures = _textures.data();
++  textureOut->user_data = frame;
++  textureOut->destruction_callback = ReleaseExternalTextureFrame;
+
+   return YES;
+ }
+diff --git a/shell/platform/embedder/embedder.h b/shell/platform/embedder/embedder.h
+index 069c813..c59d36b 100644
+--- a/shell/platform/embedder/embedder.h
++++ b/shell/platform/embedder/embedder.h
+@@ -635,6 +635,13 @@ typedef struct {
+   FlutterMetalTextureHandle* textures;
+   /// The YUV color space of the YUV external texture.
+   FlutterMetalExternalTextureYUVColorSpace yuv_color_space;
++  /// Optional per-frame resources that must remain valid while the GPU uses
++  /// these textures. Passed to destruction_callback when they can be released.
++  void* user_data;
++  /// Optional callback invoked exactly once when this frame's textures are no
++  /// longer in use, or immediately if the frame cannot be wrapped. May run on
++  /// the raster thread. Older struct sizes retain the existing behavior.
++  VoidCallback destruction_callback;
+ } FlutterMetalExternalTexture;
+
+ /// Callback to provide an external texture for a given texture_id.
+diff --git a/shell/platform/embedder/embedder_external_texture_metal.mm b/shell/platform/embedder/embedder_external_texture_metal.mm
+index 4e825e8..ab9af75 100644
+--- a/shell/platform/embedder/embedder_external_texture_metal.mm
++++ b/shell/platform/embedder/embedder_external_texture_metal.mm
+@@ -6,6 +6,7 @@
+
+ #include "flow/layers/layer.h"
+ #include "flutter/fml/logging.h"
++#include "flutter/shell/platform/embedder/embedder_struct_macros.h"
+ #import "flutter/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h"
+ #include "third_party/skia/include/core/SkImage.h"
+ #include "third_party/skia/include/core/SkSize.h"
+@@ -65,11 +66,24 @@ static bool ValidNumTextures(int expected, int actual) {
+   }
+
+   sk_sp<SkImage> image;
++  auto* texture_ptr = texture.get();
++  VoidCallback release_callback = SAFE_ACCESS(texture_ptr, destruction_callback, nullptr);
++  void* release_context = SAFE_ACCESS(texture_ptr, user_data, nullptr);
+
+   switch (texture->pixel_format) {
+     case FlutterMetalExternalTexturePixelFormat::kRGBA: {
+       if (ValidNumTextures(1, texture->num_textures)) {
+         id<MTLTexture> rgbaTex = (__bridge id<MTLTexture>)texture->textures[0];
++        if (release_callback) {
++          image = [FlutterDarwinExternalTextureSkImageWrapper wrapRGBATexture:rgbaTex
++                                                                   grContext:context
++                                                                       width:size.width()
++                                                                      height:size.height()
++                                                                 releaseProc:release_callback
++                                                              releaseContext:release_context];
++          release_callback = nullptr;
++          break;
++        }
+         image = [FlutterDarwinExternalTextureSkImageWrapper wrapRGBATexture:rgbaTex
+                                                                   grContext:context
+                                                                       width:size.width()
+@@ -85,6 +99,18 @@ static bool ValidNumTextures(int expected, int actual) {
+             texture->yuv_color_space == FlutterMetalExternalTextureYUVColorSpace::kBT601LimitedRange
+                 ? kRec601_Limited_SkYUVColorSpace
+                 : kJPEG_Full_SkYUVColorSpace;
++        if (release_callback) {
++          image = [FlutterDarwinExternalTextureSkImageWrapper wrapYUVATexture:yTex
++                                                                       UVTex:uvTex
++                                                               YUVColorSpace:colorSpace
++                                                                   grContext:context
++                                                                       width:size.width()
++                                                                      height:size.height()
++                                                                 releaseProc:release_callback
++                                                              releaseContext:release_context];
++          release_callback = nullptr;
++          break;
++        }
+         image = [FlutterDarwinExternalTextureSkImageWrapper wrapYUVATexture:yTex
+                                                                       UVTex:uvTex
+                                                               YUVColorSpace:colorSpace
+@@ -96,6 +122,10 @@ static bool ValidNumTextures(int expected, int actual) {
+     }
+   }
+
++  if (release_callback) {
++    release_callback(release_context);
++  }
++
+   if (!image) {
+     FML_LOG(ERROR) << "Could not create external texture: " << texture_id;
+   }

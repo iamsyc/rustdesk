@@ -1,0 +1,90 @@
+name: Build macOS texture lifetime experiment
+
+on:
+  push:
+    branches:
+      - 'codex/macos-texture-lifetime-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: macos-texture-lifetime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-and-package:
+    runs-on: macos-15-intel
+    timeout-minutes: 240
+    env:
+      ENGINE_WORKSPACE: ${{ runner.temp }}/rustdesk-flutter-engine
+      ENGINE_BUILD_JOBS: '3'
+    steps:
+      - name: Checkout experiment source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Inspect compiler and storage
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          df -h .
+          command -v ninja || brew install ninja
+          SDK_BUILD="$(xcodebuild -version | shasum -a 256 | cut -c 1-12)"
+          echo "ENGINE_SDK_BUILD=$SDK_BUILD" >> "$GITHUB_ENV"
+
+      - name: Download exact 1.5.0 baseline
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: RustDesk-EventTapFocusFix-1.5.0-x86_64
+          path: baseline
+          run-id: 37577650499
+          github-token: ${{ github.token }}
+
+      - name: Restore engine build objects
+        id: engine-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.ENGINE_WORKSPACE }}/src/out
+          key: texture-engine-a18df97-intel-${{ env.ENGINE_SDK_BUILD }}-${{ hashFiles('.github/patches/flutter-engine-3.24.5-macos-texture-lifetime.diff', 'scripts/build-macos-texture-engine.sh') }}
+          restore-keys: |
+            texture-engine-a18df97-intel-${{ env.ENGINE_SDK_BUILD }}-
+
+      - name: Compile pinned Flutter engine and run ownership tests
+        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE"
+
+      - name: Package original and patched comparison DMGs
+        run: |
+          bash scripts/package-macos-texture-experiment.sh \
+            baseline/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg \
+            "$ENGINE_WORKSPACE/src/out/host_release/FlutterMacOS.framework" \
+            texture-experiment
+          cp "$ENGINE_WORKSPACE/metal-probe.json" "$ENGINE_WORKSPACE/texture-tests.xml" texture-experiment/
+
+      - name: Upload comparison packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: RustDesk-TextureLifetimeExperiment-1.5.0-x86_64
+          path: texture-experiment/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Save engine build objects
+        if: always() && steps.engine-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.ENGINE_WORKSPACE }}/src/out
+          key: ${{ steps.engine-cache.outputs.cache-primary-key }}
+
+      - name: Upload engine diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: texture-engine-diagnostics
+          path: |
+            ${{ env.ENGINE_WORKSPACE }}/texture-tests.xml
+            ${{ env.ENGINE_WORKSPACE }}/metal-probe.json
+            ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/args.gn
+          if-no-files-found: ignore
+          retention-days: 14
