@@ -1,5 +1,5 @@
 diff --git a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
-index 683d515..72d8671 100644
+index 683d515..dd750e9 100644
 --- a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
 +++ b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
 @@ -27,6 +27,22 @@
@@ -10,7 +10,7 @@ index 683d515..72d8671 100644
 +                        grContext:(nonnull GrDirectContext*)grContext
 +                            width:(size_t)width
 +                           height:(size_t)height
-+                      releaseProc:(void (*_Nonnull)(void*))releaseProc
++                      releaseProc:(void (*_Nonnull)(void* _Nullable))releaseProc
 +                   releaseContext:(nullable void*)releaseContext;
 +
 ++ (sk_sp<SkImage>)wrapYUVATexture:(nonnull id<MTLTexture>)yTex
@@ -19,7 +19,7 @@ index 683d515..72d8671 100644
 +                        grContext:(nonnull GrDirectContext*)grContext
 +                            width:(size_t)width
 +                           height:(size_t)height
-+                      releaseProc:(void (*_Nonnull)(void*))releaseProc
++                      releaseProc:(void (*_Nonnull)(void* _Nullable))releaseProc
 +                   releaseContext:(nullable void*)releaseContext;
 +
  @end

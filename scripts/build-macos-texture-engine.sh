@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 1 ]]; then
-  echo "Usage: $0 ENGINE_WORKSPACE" >&2
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  echo "Usage: $0 ENGINE_WORKSPACE [prepare|compile|test|all]" >&2
   exit 2
 fi
+phase="${2:-all}"
+case "$phase" in prepare|compile|test|all) ;; *) exit 2 ;; esac
 engine_revision=a18df97ca57a249df5d8d68cd0820600223ce262
 depot_revision=071d5b9d91e06cb2a9c9ce926d6ee666df185b49
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_dir="$(cd "$script_dir/.." && pwd)"
-ninja_binary="$(command -v ninja)"
 mkdir -p "$1"
 engine_workspace="$(cd "$1" && pwd)"
+engine_source="$engine_workspace/src/flutter"
+export PATH="$engine_workspace/depot_tools:$PATH"
 export DEPOT_TOOLS_UPDATE=0 DEPOT_TOOLS_METRICS=0
 
+if [[ "$phase" == prepare || "$phase" == all ]]; then
 if [[ ! -d "$engine_workspace/depot_tools/.git" ]]; then
   git init -q "$engine_workspace/depot_tools"
   git -C "$engine_workspace/depot_tools" remote add origin \
@@ -22,7 +26,6 @@ if [[ ! -d "$engine_workspace/depot_tools/.git" ]]; then
   git -C "$engine_workspace/depot_tools" checkout --detach FETCH_HEAD
 fi
 test "$(git -C "$engine_workspace/depot_tools" rev-parse HEAD)" = "$depot_revision"
-export PATH="$engine_workspace/depot_tools:$PATH"
 
 cat > "$engine_workspace/.gclient" <<'GCLIENT'
 solutions = [{
@@ -48,8 +51,15 @@ target_os = ["mac"]
 GCLIENT
 cd "$engine_workspace"
 gclient sync --no-history --shallow --jobs=4 --revision "src/flutter@$engine_revision"
-engine_source="$engine_workspace/src/flutter"
 test "$(git -C "$engine_source" rev-parse HEAD)" = "$engine_revision"
+fi
+
+if [[ "$phase" == compile || "$phase" == all ]]; then
+ninja_binary=/usr/local/bin/ninja
+if [[ ! -x "$ninja_binary" ]]; then
+  echo "Install standalone Ninja at /usr/local/bin/ninja" >&2
+  exit 1
+fi
 patch_file="$repo_dir/.github/patches/flutter-engine-3.24.5-macos-texture-lifetime.diff"
 if git -C "$engine_source" apply --check "$patch_file"; then
   git -C "$engine_source" apply "$patch_file"
@@ -60,8 +70,32 @@ fi
 
 cd "$engine_workspace/src"
 python3 flutter/tools/gn --runtime-mode=release --no-lto --enable-unittests
+python3 - out/host_release/compile_commands.json <<'PYTHON'
+import json
+import pathlib
+import shlex
+import subprocess
+import sys
+
+wanted = {"FlutterDarwinExternalTextureMetal.mm", "FlutterExternalTexture.mm",
+          "embedder_external_texture_metal.mm", "FlutterEmbedderExternalTextureTest.mm"}
+checked = set()
+for entry in json.loads(pathlib.Path(sys.argv[1]).read_text()):
+    name = pathlib.Path(entry["file"]).name
+    if name in wanted and name not in checked:
+        print("Preflight compile:", name, flush=True)
+        args = entry.get("arguments") or shlex.split(entry["command"])
+        subprocess.run(args, cwd=entry["directory"], check=True)
+        checked.add(name)
+if checked != wanted:
+    raise SystemExit("Missing preflight entries: " + str(wanted - checked))
+PYTHON
 "$ninja_binary" -C out/host_release -j "${ENGINE_BUILD_JOBS:-3}" \
   flutter_framework flutter_desktop_darwin_unittests
+fi
+
+if [[ "$phase" == test || "$phase" == all ]]; then
+cd "$engine_workspace/src"
 out/host_release/flutter_desktop_darwin_unittests \
   --gtest_filter='FlutterEmbedderExternalTextureTest.RejectingFrameReleasesResources:FlutterEmbedderExternalTextureTest.FrameResourcesSurvivePendingGPUDraw' \
   --gtest_output="xml:$engine_workspace/texture-tests.xml"
@@ -75,4 +109,5 @@ set -e
 cat "$engine_workspace/metal-probe.json"
 if [[ "$probe_status" != 0 && "$probe_status" != 77 ]]; then
   exit "$probe_status"
+fi
 fi

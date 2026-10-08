@@ -42,6 +42,23 @@ jobs:
           run-id: 37577650499
           github-token: ${{ github.token }}
 
+      - name: Restore clean engine sources and dependencies
+        id: source-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.ENGINE_WORKSPACE }}
+          key: texture-sources-a18df97-intel-${{ env.ENGINE_SDK_BUILD }}-${{ hashFiles('scripts/build-macos-texture-engine.sh') }}
+
+      - name: Prepare pinned engine sources
+        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE" prepare
+
+      - name: Save clean engine sources before applying patch
+        if: steps.source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ env.ENGINE_WORKSPACE }}
+          key: ${{ steps.source-cache.outputs.cache-primary-key }}
+
       - name: Restore engine build objects
         id: engine-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -51,8 +68,12 @@ jobs:
           restore-keys: |
             texture-engine-a18df97-intel-${{ env.ENGINE_SDK_BUILD }}-
 
-      - name: Compile pinned Flutter engine and run ownership tests
-        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE"
+      - name: Preflight modified sources and compile Flutter engine
+        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE" compile
+
+      - name: Run frame ownership tests and Metal probe
+        timeout-minutes: 5
+        run: bash scripts/build-macos-texture-engine.sh "$ENGINE_WORKSPACE" test
 
       - name: Package original and patched comparison DMGs
         run: |
@@ -76,6 +97,19 @@ jobs:
         with:
           path: ${{ env.ENGINE_WORKSPACE }}/src/out
           key: ${{ steps.engine-cache.outputs.cache-primary-key }}
+
+      - name: Upload native engine test executable
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: texture-engine-native-tests
+          path: |
+            ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/flutter_desktop_darwin_unittests
+            ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/*.dat
+            ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/*.dylib
+            ${{ env.ENGINE_WORKSPACE }}/src/out/host_release/flutter_desktop_darwin_fixtures/
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Upload engine diagnostics
         if: always()
