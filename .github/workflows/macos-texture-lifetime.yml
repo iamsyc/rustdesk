@@ -19,7 +19,6 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 240
     env:
-      ENGINE_WORKSPACE: ${{ runner.temp }}/rustdesk-flutter-engine
       ENGINE_BUILD_JOBS: '3'
     steps:
       - name: Checkout experiment source
@@ -27,6 +26,7 @@ jobs:
 
       - name: Inspect compiler and storage
         run: |
+          echo "ENGINE_WORKSPACE=$RUNNER_TEMP/rustdesk-flutter-engine" >> "$GITHUB_ENV"
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
           df -h .
