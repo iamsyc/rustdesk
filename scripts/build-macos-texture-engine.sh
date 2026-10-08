@@ -83,8 +83,15 @@ checked = set()
 for entry in json.loads(pathlib.Path(sys.argv[1]).read_text()):
     name = pathlib.Path(entry["file"]).name
     if name in wanted and name not in checked:
-        print("Preflight compile:", name, flush=True)
+        print("Preflight syntax:", name, flush=True)
         args = entry.get("arguments") or shlex.split(entry["command"])
+        for flag in ("-o", "-MF"):
+            if flag in args:
+                index = args.index(flag)
+                del args[index:index + 2]
+        if "-MMD" in args:
+            args.remove("-MMD")
+        args.append("-fsyntax-only")
         subprocess.run(args, cwd=entry["directory"], check=True)
         checked.add(name)
 if checked != wanted:
