@@ -9,6 +9,7 @@ engine_revision=a18df97ca57a249df5d8d68cd0820600223ce262
 depot_revision=071d5b9d91e06cb2a9c9ce926d6ee666df185b49
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 repo_dir="$(cd "$script_dir/.." && pwd)"
+ninja_binary="$(command -v ninja)"
 mkdir -p "$1"
 engine_workspace="$(cd "$1" && pwd)"
 export DEPOT_TOOLS_UPDATE=0 DEPOT_TOOLS_METRICS=0
@@ -59,7 +60,7 @@ fi
 
 cd "$engine_workspace/src"
 python3 flutter/tools/gn --runtime-mode=release --no-lto --enable-unittests
-ninja -C out/host_release -j "${ENGINE_BUILD_JOBS:-3}" \
+"$ninja_binary" -C out/host_release -j "${ENGINE_BUILD_JOBS:-3}" \
   flutter_framework flutter_desktop_darwin_unittests
 out/host_release/flutter_desktop_darwin_unittests \
   --gtest_filter='FlutterEmbedderExternalTextureTest.RejectingFrameReleasesResources:FlutterEmbedderExternalTextureTest.FrameResourcesSurvivePendingGPUDraw' \
