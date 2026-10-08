@@ -17,7 +17,11 @@ The actual remote flicker remains unverified until the affected client is tested
   plugin, codecs, and EventTap/focus fixes. The experiment is ad-hoc signed,
   without notarization, like the baseline.
 - `SHA256SUMS.txt` and `manifest.json` identify the files, original build,
-  patch commit, patch hash, and rebuilt framework hash.
+patch commit, patch hash, and rebuilt framework hash.
+
+The engine build fetches `tinygltf` from its upstream GitHub repository at the
+same DEPS commit `9bb5806df4055ac973b970ba5b3e27ce27d98148`; the old Flutter
+mirror returns HTTP 400 for that commit. This changes only the download source.
 
 ## Mechanism and scope
 

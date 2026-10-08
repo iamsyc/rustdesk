@@ -28,7 +28,11 @@ solutions = [{
   "name": "src/flutter",
   "url": "https://github.com/flutter/engine.git",
   "managed": False,
-  "custom_deps": {},
+  "custom_deps": {
+    # The Flutter mirror rejects shallow fetches of this historical commit.
+    "src/flutter/third_party/tinygltf":
+      "https://github.com/syoyo/tinygltf.git@9bb5806df4055ac973b970ba5b3e27ce27d98148",
+  },
   "custom_vars": {
     "download_android_deps": False,
     "download_windows_deps": False,
