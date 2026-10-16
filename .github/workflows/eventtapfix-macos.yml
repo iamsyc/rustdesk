@@ -1,4 +1,4 @@
-name: Build macOS Event Tap and focus fix
+name: Build macOS H264 pending-output fix
 
 on:
   workflow_dispatch:
@@ -73,8 +73,20 @@ jobs:
             ./flutter/lib/generated_bridge.freezed.dart
             ./flutter/macos/Runner/bridge_generated.h
 
-  build-macos-x86_64:
-    runs-on: macos-15-intel
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            arch: arm64
+            package_arch: aarch64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            arch: x86_64
+            package_arch: x86_64
+    runs-on: ${{ matrix.runner }}
     needs: generate-bridge
     steps:
       - name: Export GitHub Actions cache variables
@@ -105,9 +117,13 @@ jobs:
           if ! command -v pkg-config >/dev/null; then
             brew install pkg-config
           fi
+          if [[ "${{ matrix.arch }}" == "arm64" ]]; then
+            brew install nasm
+          else
           curl -fL https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/macosx/nasm-2.16.03-macosx.zip -o /tmp/nasm-2.16.03.zip
           unzip -q /tmp/nasm-2.16.03.zip -d /tmp
           sudo install -m 0755 /tmp/nasm-2.16.03/nasm /usr/local/bin/nasm
+          fi
           nasm --version
 
       - name: Install Flutter
@@ -138,13 +154,13 @@ jobs:
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
           toolchain: ${{ env.MAC_RUST_VERSION }}
-          targets: x86_64-apple-darwin
+          targets: ${{ matrix.target }}
           components: rustfmt
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: eventtapfix-macos-intel-1.5.0
+          prefix-key: h264-macos-${{ matrix.package_arch }}-1.5.0
 
       - name: Restore bridge
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -173,6 +189,20 @@ jobs:
           flutter pub get
           flutter test --timeout 60s test/input_modifier_utils_test.dart test/cursor_size_test.dart test/cursor_replay_test.dart test/cursor_default_test.dart
 
+      - name: Compile VideoToolbox regression test with the build FFmpeg
+        run: |
+          cargo test --manifest-path third_party/hwcodec/Cargo.toml --test macos_h264 --no-run --message-format=json > h264-test-build.json
+          python3 - <<'PYCODE'
+          import json, shutil
+          for line in open("h264-test-build.json"):
+              item = json.loads(line)
+              if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "macos_h264" and item.get("executable"):
+                  shutil.copy2(item["executable"], "RustDesk-H264PendingFix-1.5.0-${{ matrix.package_arch }}.hardware-test")
+                  break
+          else:
+              raise SystemExit("No hardware regression test executable was produced")
+          PYCODE
+
       - name: Compile patched RustDesk
         run: |
           ./build.py --flutter --hwcodec --unix-file-copy-paste
@@ -185,7 +215,7 @@ jobs:
           test -f "${LIB}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")" = "1.5.0"
           ARCHS="$(lipo -archs "${LIB}")"
-          [[ " ${ARCHS} " == *" x86_64 "* ]]
+          [[ " ${ARCHS} " == *" ${{ matrix.arch }} "* ]]
           grep -aFq 'macOS keyboard event tap was disabled' "${LIB}"
           grep -aFq 'native Event Tap remains armed' "${LIB}"
           grep -aFq 'ignoring unsupported macOS input source' "${LIB}"
@@ -195,7 +225,7 @@ jobs:
       - name: Package DMG
         run: |
           APP="flutter/build/macos/Build/Products/Release/RustDesk.app"
-          DMG="RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg"
+          DMG="RustDesk-H264PendingFix-1.5.0-${{ matrix.package_arch }}.dmg"
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "${CREATE_DMG}")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "${CREATE_DMG}"
@@ -210,8 +240,9 @@ jobs:
       - name: Upload patched DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: RustDesk-EventTapFocusFix-1.5.0-x86_64
+          name: RustDesk-H264PendingFix-1.5.0-${{ matrix.package_arch }}
           path: |
-            RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg
+            RustDesk-H264PendingFix-1.5.0-${{ matrix.package_arch }}.dmg
             SHA256SUMS.txt
+            RustDesk-H264PendingFix-1.5.0-${{ matrix.package_arch }}.hardware-test
           retention-days: 14
