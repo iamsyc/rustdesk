@@ -27,7 +27,10 @@ fn h264_is_detected_and_pending_output_does_not_fail_encoding() {
     assert!(detected.iter().any(|v| v.name == "h264_videotoolbox"));
 
     for width in [1920, 2880] {
-        for fmt in [AVPixelFormat::AV_PIX_FMT_YUV420P, AVPixelFormat::AV_PIX_FMT_NV12] {
+        for fmt in [
+            AVPixelFormat::AV_PIX_FMT_YUV420P,
+            AVPixelFormat::AV_PIX_FMT_NV12,
+        ] {
             ctx.width = width;
             ctx.height = width * 5 / 8;
             ctx.pixfmt = fmt;
@@ -40,8 +43,14 @@ fn h264_is_detected_and_pending_output_does_not_fail_encoding() {
                 packets += frames.len();
                 keyframes += frames.iter().filter(|frame| frame.key == 1).count();
             }
-            assert!(packets > 0 && keyframes > 0, "encoder must produce a keyframe");
-            assert!(encoder.encode(&[], 2000).is_err(), "invalid input must fail");
+            assert!(
+                packets > 0 && keyframes > 0,
+                "encoder must produce a keyframe"
+            );
+            assert!(
+                encoder.encode(&[], 2000).is_err(),
+                "invalid input must fail"
+            );
         }
     }
 }
