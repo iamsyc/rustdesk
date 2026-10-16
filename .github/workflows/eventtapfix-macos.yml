@@ -15,6 +15,7 @@ env:
   FLUTTER_VERSION: "3.24.5"
   VCPKG_COMMIT_ID: "3cd21e48a75f67acfef289da52893ce79144aaa1"
   VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  MACOSX_DEPLOYMENT_TARGET: "15.8"
 
 jobs:
   generate-bridge:
@@ -214,6 +215,7 @@ jobs:
           test -d "${APP}"
           test -f "${LIB}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")" = "1.5.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${APP}/Contents/Info.plist")" = "15.8"
           ARCHS="$(lipo -archs "${LIB}")"
           [[ " ${ARCHS} " == *" ${{ matrix.arch }} "* ]]
           grep -aFq 'macOS keyboard event tap was disabled' "${LIB}"

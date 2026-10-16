@@ -16,6 +16,10 @@ Changes:
 * Exercise real hardware through `tests/macos_h264.rs` and the root
   `scripts/test-macos-h264.sh` probe. The latter can use a system FFmpeg;
   the Rust integration test uses the dependency's normal build and linked FFmpeg.
+  It also decodes the H.264 packets through VideoToolbox and checks frame sizes.
+
+The application requires macOS 15.8 or newer. Rust, Runner, and CocoaPods
+deployment targets use this minimum.
 
 RustDesk propagates this no-output result as a typed pending condition, without
 counting it as an encoder failure. Real hardware errors remain errors. A refresh
