@@ -6,7 +6,8 @@ RustDesk's Cargo.lock. Upstream source and metadata are retained.
 
 Changes:
 
-* Register H.264 VideoToolbox when the system reports hardware support.
+* Restore the native H.264 hardware capability probe and register H.264
+  VideoToolbox when it reports hardware support.
 * Allow the macOS capability probe up to one second of input before requiring
   its first keyframe. The input frame count is limited to one second at the
   configured frame rate.

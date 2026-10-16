@@ -8,6 +8,7 @@ use hwcodec::{
 
 #[test]
 fn h264_is_detected_and_pending_output_does_not_fail_encoding() {
+    env_logger::init();
     let mut ctx = EncodeContext {
         name: "h264_videotoolbox".into(),
         mc_name: None,
