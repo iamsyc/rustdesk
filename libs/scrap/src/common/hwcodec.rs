@@ -133,6 +133,8 @@ impl EncoderApi for HwRamEncoder {
                 _ => bail!("unsupported format: {:?}", self.format),
             }
             Ok(vf)
+        } else if cfg!(target_os = "macos") {
+            Err(crate::codec::EncodePending.into())
         } else {
             Err(anyhow!("no valid frame"))
         }
@@ -236,7 +238,7 @@ impl HwRamEncoder {
                 data.append(v);
                 Ok(data)
             }
-            Err(_) => Ok(Vec::<EncodeFrame>::new()),
+            Err(code) => Err(anyhow!("hardware encoder returned error {code}")),
         }
     }
 

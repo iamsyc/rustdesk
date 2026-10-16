@@ -47,6 +47,18 @@ lazy_static::lazy_static! {
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
 
+/// Input was accepted; the asynchronous encoder has no output frame yet.
+#[derive(Debug)]
+pub struct EncodePending;
+
+impl std::fmt::Display for EncodePending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("encoder output pending")
+    }
+}
+
+impl std::error::Error for EncodePending {}
+
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
     VPX(VpxEncoderConfig),
