@@ -51,6 +51,7 @@ pub struct HwRamEncoderConfig {
 
 pub struct HwRamEncoder {
     encoder: Encoder,
+    pending_output: bool,
     pub format: DataFormat,
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
@@ -96,6 +97,7 @@ impl EncoderApi for HwRamEncoder {
                 match Encoder::new(ctx.clone()) {
                     Ok(encoder) => Ok(HwRamEncoder {
                         encoder,
+                        pending_output: true,
                         format,
                         pixfmt: ctx.pixfmt,
                         bitrate,
@@ -109,12 +111,16 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
+        self.pending_output = true;
         let mut vf = VideoFrame::new();
         let mut frames = Vec::new();
         for frame in self
             .encode(input.yuv()?, ms)
             .with_context(|| "Failed to encode")?
         {
+            if frame.pts == ms {
+                self.pending_output = false;
+            }
             frames.push(EncodedVideoFrame {
                 data: Bytes::from(frame.data),
                 pts: frame.pts,
@@ -197,6 +203,10 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn latency_free(&self) -> bool {
+        if cfg!(target_os = "macos") && self.config.name == "h264_videotoolbox" {
+            // Low-delay H.264 needs a repeated input only while an output is pending.
+            return !self.pending_output;
+        }
         ["mediacodec", "videotoolbox"]
             .iter()
             .all(|&x| !self.config.name.contains(x))
@@ -312,6 +322,11 @@ pub struct HwRamDecoder {
 }
 
 impl HwRamDecoder {
+    #[cfg(target_os = "macos")]
+    pub fn decode_native(&mut self, data: &[u8]) -> ResultType<Option<::hwcodec::ffmpeg_ram::decode::native::NativeFrame>> {
+        self.decoder.decode_native(data).map_err(|e| anyhow!(e))
+    }
+
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         let mut info = None;
         let soft = CodecInfo::soft();

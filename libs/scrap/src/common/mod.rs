@@ -73,6 +73,8 @@ pub struct ImageRgb {
     pub h: usize,
     pub fmt: ImageFormat,
     pub align: usize,
+    #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+    pub native: Option<::hwcodec::ffmpeg_ram::decode::native::NativeFrame>,
 }
 
 impl ImageRgb {
@@ -83,6 +85,8 @@ impl ImageRgb {
             h: 0,
             fmt,
             align,
+            #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+            native: None,
         }
     }
 

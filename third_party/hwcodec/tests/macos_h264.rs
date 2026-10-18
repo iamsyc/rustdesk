@@ -14,6 +14,79 @@ extern "C" {
 }
 
 #[test]
+fn native_decode_matches_owned_planes() {
+    use std::ffi::c_void;
+    extern "C" {
+        fn CVPixelBufferLockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+        fn CVPixelBufferUnlockBaseAddress(buffer: *mut c_void, flags: u64) -> i32;
+        fn CVPixelBufferGetBaseAddressOfPlane(buffer: *mut c_void, plane: usize) -> *const u8;
+        fn CVPixelBufferGetBytesPerRowOfPlane(buffer: *mut c_void, plane: usize) -> usize;
+    }
+    let samples: [(&str, &[u8]); 2] = [
+        ("h264", include_bytes!("../src/res/720p.h264")),
+        ("hevc", include_bytes!("../src/res/720p.h265")),
+    ];
+    for (codec, packet) in samples {
+        let ctx = DecodeContext {
+            name: codec.into(),
+            device_type: AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            thread_count: 1,
+        };
+        let mut owned = Decoder::new(ctx.clone()).expect("owned decoder");
+        let mut native = Decoder::new(ctx).expect("native decoder");
+        let mut retained = None;
+        for _ in 0..8 {
+            let expected = owned.decode(packet).expect("owned decode");
+            assert_eq!(expected.len(), 1);
+            let expected = &expected[0];
+            let actual = native
+                .decode_native(packet)
+                .expect("native decode")
+                .expect("frame");
+            assert_eq!(
+                (actual.width, actual.height),
+                (expected.width, expected.height)
+            );
+            assert_eq!(expected.pixfmt, AVPixelFormat::AV_PIX_FMT_NV12);
+            unsafe {
+                assert_eq!(CVPixelBufferLockBaseAddress(actual.as_ptr(), 1), 0);
+                for plane in 0..2 {
+                    let data = CVPixelBufferGetBaseAddressOfPlane(actual.as_ptr(), plane);
+                    let stride = CVPixelBufferGetBytesPerRowOfPlane(actual.as_ptr(), plane);
+                    let rows = if plane == 0 {
+                        actual.height
+                    } else {
+                        (actual.height + 1) / 2
+                    };
+                    for row in 0..rows as usize {
+                        let offset = row * expected.linesize[plane] as usize;
+                        assert_eq!(
+                            std::slice::from_raw_parts(
+                                data.add(row * stride),
+                                actual.width as usize
+                            ),
+                            &expected.data[plane][offset..offset + actual.width as usize]
+                        );
+                    }
+                }
+                assert_eq!(CVPixelBufferUnlockBaseAddress(actual.as_ptr(), 1), 0);
+            }
+            if retained.is_none() {
+                retained = Some(actual.clone());
+            }
+        }
+        drop(native);
+        let frame = retained.expect("retained frame");
+        unsafe {
+            assert_eq!(CVPixelBufferLockBaseAddress(frame.as_ptr(), 1), 0);
+            assert!(!CVPixelBufferGetBaseAddressOfPlane(frame.as_ptr(), 0).is_null());
+            assert_eq!(CVPixelBufferUnlockBaseAddress(frame.as_ptr(), 1), 0);
+        }
+        println!("PASS {codec}: native pixels match; retained frame outlives decoder");
+    }
+}
+
+#[test]
 fn h264_is_detected_and_pending_output_does_not_fail_encoding() {
     env_logger::init();
     let version = unsafe { avcodec_version() };

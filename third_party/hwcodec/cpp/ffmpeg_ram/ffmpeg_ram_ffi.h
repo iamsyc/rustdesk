@@ -24,6 +24,10 @@ int ffmpeg_ram_encode(void *encoder, const uint8_t *data, int length,
                       const void *obj, int64_t ms);
 int ffmpeg_ram_decode(void *decoder, const uint8_t *data, int length,
                       const void *obj);
+#ifdef __APPLE__
+int ffmpeg_ram_decode_native(void *decoder, const uint8_t *data, int length,
+                             const void *obj, RamDecodeCallback callback);
+#endif
 void ffmpeg_ram_free_encoder(void *encoder);
 void ffmpeg_ram_free_decoder(void *decoder);
 int ffmpeg_ram_get_linesize_offset_length(int pix_fmt, int width, int height,

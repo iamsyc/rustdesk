@@ -1,0 +1,142 @@
+diff --git a/libavcodec/videotoolbox.c b/libavcodec/videotoolbox.c
+index 505483e..5480b32 100644
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -108,11 +108,6 @@ static int videotoolbox_postproc_frame(void *avctx, AVFrame *frame)
+     frame->crop_top = 0;
+     frame->crop_bottom = 0;
+ 
+-    if ((ret = av_vt_pixbuf_set_attachments(avctx, ref->pixbuf, frame)) < 0)
+-        return ret;
+-
+-    frame->data[3] = (uint8_t*)ref->pixbuf;
+-
+     if (ref->hw_frames_ctx) {
+         av_buffer_unref(&frame->hw_frames_ctx);
+         frame->hw_frames_ctx = av_buffer_ref(ref->hw_frames_ctx);
+@@ -120,6 +115,11 @@ static int videotoolbox_postproc_frame(void *avctx, AVFrame *frame)
+             return AVERROR(ENOMEM);
+     }
+ 
++    if ((ret = av_vt_pixbuf_set_attachments(avctx, ref->pixbuf, frame)) < 0)
++        return ret;
++
++    frame->data[3] = (uint8_t*)ref->pixbuf;
++
+     return 0;
+ }
+ 
+diff --git a/libavutil/hwcontext_videotoolbox.c b/libavutil/hwcontext_videotoolbox.c
+index 622a826..61bebfb 100644
+--- a/libavutil/hwcontext_videotoolbox.c
++++ b/libavutil/hwcontext_videotoolbox.c
+@@ -22,6 +22,9 @@
+ #include <string.h>
+ 
+ #include <VideoToolbox/VideoToolbox.h>
++#if TARGET_OS_OSX
++#include <os/lock.h>
++#endif
+ 
+ #include "buffer.h"
+ #include "buffer_internal.h"
+@@ -58,6 +61,11 @@ typedef struct VTFramesContext {
+      */
+     AVVTFramesContext p;
+     CVPixelBufferPoolRef pool;
++#if TARGET_OS_OSX
++    os_unfair_lock colorspace_lock;
++    CFDictionaryRef color_properties;
++    CGColorSpaceRef colorspace;
++#endif
+ } VTFramesContext;
+ 
+ static const struct {
+@@ -284,6 +292,12 @@ static AVBufferRef *vt_pool_alloc_buffer(void *opaque, size_t size)
+ static void vt_frames_uninit(AVHWFramesContext *ctx)
+ {
+     VTFramesContext *fctx = ctx->hwctx;
++#if TARGET_OS_OSX
++    if (fctx->color_properties)
++        CFRelease(fctx->color_properties);
++    if (fctx->colorspace)
++        CFRelease(fctx->colorspace);
++#endif
+     if (fctx->pool) {
+         CVPixelBufferPoolRelease(fctx->pool);
+         fctx->pool = NULL;
+@@ -293,6 +307,11 @@ static void vt_frames_uninit(AVHWFramesContext *ctx)
+ static int vt_frames_init(AVHWFramesContext *ctx)
+ {
+     int i, ret;
++#if TARGET_OS_OSX
++    VTFramesContext *fctx = ctx->hwctx;
++    const os_unfair_lock initial_lock = OS_UNFAIR_LOCK_INIT;
++    fctx->colorspace_lock = initial_lock;
++#endif
+ 
+     for (i = 0; i < FF_ARRAY_ELEMS(supported_formats); i++) {
+         if (ctx->sw_format == supported_formats[i])
+@@ -582,6 +601,47 @@ static CFDictionaryRef vt_cv_buffer_copy_attachments(CVBufferRef buffer,
+     #endif
+ }
+ 
++#if TARGET_OS_OSX
++static CGColorSpaceRef vt_decoder_colorspace(CFDictionaryRef attachments,
++                                             const AVFrame *src)
++{
++    AVHWFramesContext *frames = (AVHWFramesContext *)src->hw_frames_ctx->data;
++    VTFramesContext *fctx = frames->hwctx;
++    const CFStringRef keys[] = {
++        kCVImageBufferICCProfileKey, kCVImageBufferColorPrimariesKey,
++        kCVImageBufferTransferFunctionKey, kCVImageBufferYCbCrMatrixKey,
++        kCVImageBufferGammaLevelKey,
++    };
++    CFMutableDictionaryRef properties = CFDictionaryCreateMutable(NULL, 0,
++        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++    CGColorSpaceRef result;
++
++    // These are the documented inputs to Core Video's color-space synthesis.
++    for (int i = 0; i < FF_ARRAY_ELEMS(keys); i++) {
++        CFTypeRef value = CFDictionaryGetValue(attachments, keys[i]);
++        if (value)
++            CFDictionarySetValue(properties, keys[i], value);
++    }
++    os_unfair_lock_lock(&fctx->colorspace_lock);
++    if (fctx->colorspace && fctx->color_properties &&
++        CFEqual(fctx->color_properties, properties)) {
++        result = (CGColorSpaceRef)CFRetain(fctx->colorspace);
++    } else {
++        result = CVImageBufferCreateColorSpaceFromAttachments(attachments);
++        if (fctx->color_properties)
++            CFRelease(fctx->color_properties);
++        if (fctx->colorspace)
++            CFRelease(fctx->colorspace);
++        fctx->color_properties = CFPropertyListCreateDeepCopy(NULL, properties,
++                                                             kCFPropertyListImmutable);
++        fctx->colorspace = result ? (CGColorSpaceRef)CFRetain(result) : NULL;
++    }
++    os_unfair_lock_unlock(&fctx->colorspace_lock);
++    CFRelease(properties);
++    return result;
++}
++#endif
++
+ static int vt_pixbuf_set_colorspace(void *log_ctx,
+                                     CVPixelBufferRef pixbuf, const AVFrame *src)
+ {
+@@ -645,8 +705,12 @@ static int vt_pixbuf_set_colorspace(void *log_ctx,
+             vt_cv_buffer_copy_attachments(pixbuf, kCVAttachmentMode_ShouldPropagate);
+ 
+         if (attachments) {
+-            colorspace =
+-                CVImageBufferCreateColorSpaceFromAttachments(attachments);
++#if TARGET_OS_OSX
++            if (src->format == AV_PIX_FMT_VIDEOTOOLBOX && src->hw_frames_ctx)
++                colorspace = vt_decoder_colorspace(attachments, src);
++            else
++#endif
++                colorspace = CVImageBufferCreateColorSpaceFromAttachments(attachments);
+             CFRelease(attachments);
+         }
+     }

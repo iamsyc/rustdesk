@@ -1,0 +1,209 @@
+diff --git a/include/core/SkYUVAInfo.h b/include/core/SkYUVAInfo.h
+index bbbae5d..0681867 100644
+--- a/include/core/SkYUVAInfo.h
++++ b/include/core/SkYUVAInfo.h
+@@ -86,13 +86,15 @@ public:
+     /**
+      * Describes how subsampled chroma values are sited relative to luma values.
+      *
+-     * Currently only centered siting is supported but will expand to support additional sitings.
++     * Ganesh supports centered and cosited siting. Graphite currently supports centered siting.
+      */
+     enum class Siting {
+         /**
+          * Subsampled chroma value is sited at the center of the block of corresponding luma values.
+          */
+         kCentered,
++        /** Chroma is aligned with the first luma sample of each subsampling block. */
++        kCosited,
+     };
+ 
+     static constexpr int kMaxPlanes = 4;
+diff --git a/src/gpu/ganesh/effects/GrYUVtoRGBEffect.cpp b/src/gpu/ganesh/effects/GrYUVtoRGBEffect.cpp
+index 6636033..3f8eca3 100644
+--- a/src/gpu/ganesh/effects/GrYUVtoRGBEffect.cpp
++++ b/src/gpu/ganesh/effects/GrYUVtoRGBEffect.cpp
+@@ -89,23 +89,27 @@ std::unique_ptr<GrFragmentProcessor> GrYUVtoRGBEffect::Make(const GrYUVATextureP
+         if (ssx > 1 || ssy > 1) {
+             scaleX = 1.f/ssx;
+             scaleY = 1.f/ssy;
+-            // We would want to add a translation to this matrix to handle other sitings.
+-            SkASSERT(yuvaProxies.yuvaInfo().sitingX() == SkYUVAInfo::Siting::kCentered);
+-            SkASSERT(yuvaProxies.yuvaInfo().sitingY() == SkYUVAInfo::Siting::kCentered);
+             planeMatrix.postConcat(SkMatrix::Scale(scaleX, scaleY));
++            const float offsetX = yuvaProxies.yuvaInfo().sitingX() == SkYUVAInfo::Siting::kCosited
++                    ? (1.f - scaleX) * 0.5f : 0.f;
++            const float offsetY = yuvaProxies.yuvaInfo().sitingY() == SkYUVAInfo::Siting::kCosited
++                    ? (1.f - scaleY) * 0.5f : 0.f;
++            if (offsetX != 0.f || offsetY != 0.f) {
++                planeMatrix.postTranslate(offsetX, offsetY);
++            }
+             if (subset) {
+-                planeSubset = {subset->fLeft  *scaleX,
+-                               subset->fTop   *scaleY,
+-                               subset->fRight *scaleX,
+-                               subset->fBottom*scaleY};
++                planeSubset = {subset->fLeft  *scaleX + offsetX,
++                               subset->fTop   *scaleY + offsetY,
++                               subset->fRight *scaleX + offsetX,
++                               subset->fBottom*scaleY + offsetY};
+             } else {
+                 planeSubset = SkRect::Make(view.dimensions());
+             }
+             if (domain) {
+-                planeDomain = {domain->fLeft  *scaleX,
+-                               domain->fTop   *scaleY,
+-                               domain->fRight *scaleX,
+-                               domain->fBottom*scaleY};
++                planeDomain = {domain->fLeft  *scaleX + offsetX,
++                               domain->fTop   *scaleY + offsetY,
++                               domain->fRight *scaleX + offsetX,
++                               domain->fBottom*scaleY + offsetY};
+             }
+             // If the image is not a multiple of the subsampling then the subsampled plane needs to
+             // be tiled at less than its full width/height. This only matters when the mode is not
+diff --git a/src/gpu/ganesh/image/SkImage_GaneshYUVA.cpp b/src/gpu/ganesh/image/SkImage_GaneshYUVA.cpp
+index 8b836f1..906dce7 100644
+--- a/src/gpu/ganesh/image/SkImage_GaneshYUVA.cpp
++++ b/src/gpu/ganesh/image/SkImage_GaneshYUVA.cpp
+@@ -56,12 +56,51 @@
+ 
+ #include <algorithm>
+ #include <utility>
++#if defined(SK_BUILD_FOR_MAC)
++#include "include/core/SkM44.h"
++#include "src/core/SkRuntimeEffectPriv.h"
++#include "src/gpu/ganesh/effects/GrSkSLFP.h"
++#include <cstring>
++#endif
+ 
+ enum class SkTileMode;
+ struct SkRect;
+ 
+ static constexpr auto kAssumedColorType = kRGBA_8888_SkColorType;
+ 
++#if defined(SK_BUILD_FOR_MAC)
++// Core Video's current source profile uses this pure power curve. Specializing
++// the normalized opaque YUV path removes generic transfer-function parameters.
++static std::unique_ptr<GrFragmentProcessor> native_gamma_xform(
++        std::unique_ptr<GrFragmentProcessor> input, const SkColorSpaceXformSteps& steps) {
++    static const SkRuntimeEffect* effect = SkMakeRuntimeEffect(
++        SkRuntimeEffect::MakeForColorFilter, R"(
++        uniform float4 row0;
++        uniform float4 row1;
++        uniform float4 row2;
++        float encode(float x) {
++            float s = sign(x);
++            x = abs(x);
++            return s * (x < 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055);
++        }
++        half4 main(half4 color) {
++            float3 x = float3(color.rgb);
++            float3 linear = pow(x, float3(1.9609375));
++            float3 rgb = float3(dot(row0.xyz, linear), dot(row1.xyz, linear),
++                                dot(row2.xyz, linear));
++            return half4(encode(rgb.r), encode(rgb.g), encode(rgb.b), color.a);
++        }
++    )");
++    const float identity[] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
++    const float* m = steps.flags.gamut_transform ? steps.src_to_dst_matrix : identity;
++    return GrSkSLFP::Make(effect, "NativeYuvGamma", std::move(input),
++                         GrSkSLFP::OptFlags::kPreservesOpaqueInput,
++                         "row0", SkV4{m[0], m[3], m[6], 0},
++                         "row1", SkV4{m[1], m[4], m[7], 0},
++                         "row2", SkV4{m[2], m[5], m[8], 0});
++}
++#endif
++
+ SkImage_GaneshYUVA::SkImage_GaneshYUVA(sk_sp<GrImageContext> context,
+                                        uint32_t uniqueID,
+                                        GrYUVATextureProxies proxies,
+@@ -267,6 +306,19 @@ std::unique_ptr<GrFragmentProcessor> SkImage_GaneshYUVA::asFragmentProcessor(
+                                    sampling.cubic,
+                                    GrBicubicEffect::Direction::kXY);
+     }
++#if defined(SK_BUILD_FOR_MAC)
++    if (fFromColorSpace && this->colorSpace() && this->colorSpace()->isSRGB() &&
++        this->alphaType() == kOpaque_SkAlphaType && !sampling.useCubic &&
++        fYUVAProxies.yuvaInfo().yuvColorSpace() != kIdentity_SkYUVColorSpace) {
++        skcms_TransferFunction transfer;
++        const skcms_TransferFunction native = {1.9609375f, 1, 0, 0, 0, 0, 0};
++        if (fFromColorSpace->isNumericalTransferFn(&transfer) &&
++            std::memcmp(&transfer, &native, sizeof(native)) == 0) {
++            return native_gamma_xform(std::move(fp), SkColorSpaceXformSteps(
++                fFromColorSpace.get(), this->alphaType(), this->colorSpace(), this->alphaType()));
++        }
++    }
++#endif
+     if (fFromColorSpace) {
+         fp = GrColorSpaceXformEffect::Make(std::move(fp),
+                                            fFromColorSpace.get(),
+diff --git a/src/gpu/ganesh/mtl/GrMtlCommandBuffer.mm b/src/gpu/ganesh/mtl/GrMtlCommandBuffer.mm
+index 3bd7a19..96d21e8 100644
+--- a/src/gpu/ganesh/mtl/GrMtlCommandBuffer.mm
++++ b/src/gpu/ganesh/mtl/GrMtlCommandBuffer.mm
+@@ -8,6 +8,8 @@
+ #include "src/gpu/ganesh/mtl/GrMtlCommandBuffer.h"
+ 
+ #include "src/core/SkTraceEvent.h"
++#include <cstdio>
++#include <cstdlib>
+ #include "src/gpu/ganesh/mtl/GrMtlGpu.h"
+ #include "src/gpu/ganesh/mtl/GrMtlOpsRenderPass.h"
+ #include "src/gpu/ganesh/mtl/GrMtlPipelineState.h"
+@@ -167,6 +169,12 @@ static bool compatible(const MTLRenderPassAttachmentDescriptor* first,
+         NSLog(@"GrMtlCommandBuffer: tried to create MTLRenderCommandEncoder while in bad state.");
+         return nullptr;
+     }
++    static const bool traceFrames = std::getenv("RUSTDESK_FRAME_TRACE") != nullptr;
++    if (traceFrames) {
++        std::fprintf(stderr, "RD_FRAME stage=target command=%p surface=%p t=%.9f\n",
++            this, (__bridge void*)descriptor.colorAttachments[0].texture,
++            NSProcessInfo.processInfo.systemUptime);
++    }
+     fActiveRenderCommandEncoder = GrMtlRenderCommandEncoder::Make(
+             [fCmdBuffer renderCommandEncoderWithDescriptor:descriptor]);
+     if (opsRenderPass) {
+@@ -184,6 +192,16 @@ static bool compatible(const MTLRenderPassAttachmentDescriptor* first,
+         NSLog(@"GrMtlCommandBuffer: Tried to commit command buffer while in invalid state.\n");
+         return false;
+     }
++    static const bool traceGpu = std::getenv("RUSTDESK_GPU_TRACE") != nullptr;
++    if (traceGpu) {
++        const double submitted = NSProcessInfo.processInfo.systemUptime;
++        const void* command = this;
++        [fCmdBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
++            std::fprintf(stderr, "RD_SKIA_GPU submit_s=%.9f start_s=%.9f end_s=%.9f complete_s=%.9f command=%p\n",
++                         submitted, completed.GPUStartTime, completed.GPUEndTime,
++                         NSProcessInfo.processInfo.systemUptime, command);
++        }];
++    }
+     [fCmdBuffer commit];
+     if (waitUntilCompleted) {
+         this->waitUntilCompleted();
+diff --git a/src/gpu/ganesh/mtl/GrMtlPipelineState.mm b/src/gpu/ganesh/mtl/GrMtlPipelineState.mm
+index 3f34aa4..6f12f70 100644
+--- a/src/gpu/ganesh/mtl/GrMtlPipelineState.mm
++++ b/src/gpu/ganesh/mtl/GrMtlPipelineState.mm
+@@ -17,6 +17,8 @@
+ #include "src/gpu/ganesh/mtl/GrMtlBuffer.h"
+ #include "src/gpu/ganesh/mtl/GrMtlFramebuffer.h"
+ #include "src/gpu/ganesh/mtl/GrMtlGpu.h"
++#include <cstdio>
++#include <cstdlib>
+ #include "src/gpu/ganesh/mtl/GrMtlRenderCommandEncoder.h"
+ #include "src/gpu/ganesh/mtl/GrMtlTexture.h"
+ #include "src/sksl/SkSLCompiler.h"
+@@ -130,6 +132,12 @@
+ void GrMtlPipelineState::bindTextures(GrMtlRenderCommandEncoder* renderCmdEncoder) {
+     SkASSERT(fNumSamplers == fSamplerBindings.size());
+     for (int index = 0; index < fNumSamplers; ++index) {
++        static const bool traceFrames = std::getenv("RUSTDESK_FRAME_TRACE") != nullptr;
++        if (traceFrames && [fSamplerBindings[index].fTexture.label hasPrefix:@"RD:"]) {
++            std::fprintf(stderr, "RD_FRAME stage=bind tag=%s command=%p t=%.9f\n",
++                fSamplerBindings[index].fTexture.label.UTF8String, fGpu->commandBuffer(),
++                NSProcessInfo.processInfo.systemUptime);
++        }
+         renderCmdEncoder->setFragmentTexture(fSamplerBindings[index].fTexture, index);
+         renderCmdEncoder->setFragmentSamplerState(fSamplerBindings[index].fSampler, index);
+     }

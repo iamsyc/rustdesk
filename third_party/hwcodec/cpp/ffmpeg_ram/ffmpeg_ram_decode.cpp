@@ -155,7 +155,8 @@ public:
     return 0;
   }
 
-  int decode(const uint8_t *data, int length, const void *obj) {
+  int decode(const uint8_t *data, int length, const void *obj,
+             RamDecodeCallback native_callback = nullptr) {
     int ret = -1;
 #ifdef CFG_PKG_TRACE
     in_++;
@@ -168,12 +169,12 @@ public:
     }
     pkt_->data = (uint8_t *)data;
     pkt_->size = length;
-    ret = do_decode(obj);
+    ret = do_decode(obj, native_callback);
     return ret;
   }
 
 private:
-  int do_decode(const void *obj) {
+  int do_decode(const void *obj, RamDecodeCallback native_callback) {
     int ret;
     AVFrame *tmp_frame = NULL;
     bool decoded = false;
@@ -197,13 +198,22 @@ private:
           LOG_ERROR(std::string("hw_frames_ctx is NULL"));
           goto _exit;
         }
-        if ((ret = av_hwframe_transfer_data(sw_frame_, frame_, 0)) < 0) {
-          LOG_ERROR(std::string("av_hwframe_transfer_data failed, ret = ") +
-                    av_err2str(ret));
-          goto _exit;
+#ifdef __APPLE__
+        if (native_callback && device_type_ == AV_HWDEVICE_TYPE_VIDEOTOOLBOX) {
+          if (frame_->format != AV_PIX_FMT_VIDEOTOOLBOX) {
+            LOG_ERROR(std::string("VideoToolbox returned a non-native frame"));
+            goto _exit;
+          }
+          tmp_frame = frame_;
+        } else
+#endif
+        {
+          if ((ret = av_hwframe_transfer_data(sw_frame_, frame_, 0)) < 0) {
+            LOG_ERROR(std::string("av_hwframe_transfer_data failed, ret = ") + av_err2str(ret));
+            goto _exit;
+          }
+          tmp_frame = sw_frame_;
         }
-
-        tmp_frame = sw_frame_;
       } else {
         tmp_frame = frame_;
       }
@@ -218,7 +228,7 @@ private:
       int key_frame = frame_->key_frame;
 #endif
 
-      callback_(obj, tmp_frame->width, tmp_frame->height,
+      (native_callback ? native_callback : callback_)(obj, tmp_frame->width, tmp_frame->height,
                 (AVPixelFormat)tmp_frame->format, tmp_frame->linesize,
                 tmp_frame->data, key_frame);
     }
@@ -324,3 +334,20 @@ extern "C" int ffmpeg_ram_decode(FFmpegRamDecoder *decoder, const uint8_t *data,
   }
   return HWCODEC_ERR_COMMON;
 }
+
+#ifdef __APPLE__
+extern "C" int ffmpeg_ram_decode_native(FFmpegRamDecoder *decoder,
+    const uint8_t *data, int length, const void *obj, RamDecodeCallback callback) {
+  if (!callback || decoder->device_type_ != AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
+    return HWCODEC_ERR_COMMON;
+  try {
+    int ret = decoder->decode(data, length, obj, callback);
+    if (DataFormat::H265 == decoder->data_format_ && util_decode::has_flag_could_not_find_ref_with_poc())
+      return HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC;
+    return ret == 0 ? HWCODEC_SUCCESS : HWCODEC_ERR_COMMON;
+  } catch (const std::exception &e) {
+    LOG_ERROR(std::string("ffmpeg_ram_decode_native exception:") + e.what());
+    return HWCODEC_ERR_COMMON;
+  }
+}
+#endif

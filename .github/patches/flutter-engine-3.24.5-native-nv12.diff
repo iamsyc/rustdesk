@@ -1,0 +1,829 @@
+diff --git a/shell/common/animator.cc b/shell/common/animator.cc
+index e8329c1..2d4fa14 100644
+--- a/shell/common/animator.cc
++++ b/shell/common/animator.cc
+@@ -237,6 +237,19 @@ void Animator::DrawLastLayerTrees(
+ }
+ 
+ void Animator::RequestFrame(bool regenerate_layer_trees) {
++#if defined(FML_OS_MACOSX)
++  if (!regenerate_layer_trees && has_rendered_ && regenerate_layer_trees_) {
++    // Keep the pending UI frame's semaphore and vsync callback intact while
++    // refreshing the texture in the last rendered layer trees.
++    auto timings = std::make_unique<FrameTimingsRecorder>();
++    const auto now = fml::TimePoint::Now();
++    timings->RecordVsync(now, now);
++    timings->RecordBuildStart(now);
++    timings->RecordBuildEnd(now);
++    delegate_.OnAnimatorDrawLastLayerTrees(std::move(timings));
++    return;
++  }
++#endif
+   if (regenerate_layer_trees && !regenerate_layer_trees_) {
+     // This event will be closed by BeginFrame. BeginFrame will only be called
+     // if regenerating the layer trees. If a frame has been requested to update
+@@ -271,6 +284,19 @@ void Animator::RequestFrame(bool regenerate_layer_trees) {
+ }
+ 
+ void Animator::AwaitVSync() {
++#if defined(FML_OS_MACOSX)
++  // A decoded texture already has its own producer cadence. Reusing the layer
++  // trees can draw immediately without waiting an extra display interval.
++  if (has_rendered_ && CanReuseLastLayerTrees()) {
++    auto timings = std::make_unique<FrameTimingsRecorder>();
++    const auto now = fml::TimePoint::Now();
++    timings->RecordVsync(now, now);
++    frame_scheduled_ = false;
++    DrawLastLayerTrees(std::move(timings));
++    delegate_.OnAnimatorNotifyIdle(dart_frame_deadline_);
++    return;
++  }
++#endif
+   waiter_->AsyncWaitForVsync(
+       [self = weak_factory_.GetWeakPtr()](
+           std::unique_ptr<FrameTimingsRecorder> frame_timings_recorder) {
+diff --git a/shell/common/animator_unittests.cc b/shell/common/animator_unittests.cc
+index a446737..bcc5aa0 100644
+--- a/shell/common/animator_unittests.cc
++++ b/shell/common/animator_unittests.cc
+@@ -52,6 +52,73 @@ class FakeAnimatorDelegate : public Animator::Delegate {
+   bool notify_idle_called_ = false;
+ };
+ 
++#if defined(FML_OS_MACOSX)
++TEST_F(ShellTest, CachedTextureFramesDoNotWaitForVsync) {
++  class Delegate : public FakeAnimatorDelegate {
++   public:
++    int redraws = 0;
++    void OnAnimatorDrawLastLayerTrees(
++        std::unique_ptr<FrameTimingsRecorder> timings) override {
++      EXPECT_EQ(timings->GetVsyncStartTime(), timings->GetVsyncTargetTime());
++      redraws++;
++    }
++  } delegate;
++  class Waiter : public VsyncWaiter {
++   public:
++    explicit Waiter(const TaskRunners& runners) : VsyncWaiter(runners) {}
++    int waits = 0;
++    void Tick() {
++      const auto now = fml::TimePoint::Now();
++      FireCallback(now, now + fml::TimeDelta::FromMilliseconds(16), false);
++    }
++   private:
++    void AwaitVSync() override { waits++; }
++  };
++  auto runner = CreateNewThread();
++  TaskRunners runners("texture-test", runner, runner, runner, runner);
++  std::unique_ptr<Animator> animator;
++  Waiter* waiter = nullptr;
++  EXPECT_CALL(delegate, OnAnimatorBeginFrame).Times(2).WillRepeatedly([&] {
++    animator->Render(kImplicitViewId,
++        std::make_unique<LayerTree>(nullptr, SkISize::Make(600, 800)), 1.0);
++  });
++  EXPECT_CALL(delegate, OnAnimatorDraw).Times(2).WillRepeatedly(
++      [](std::shared_ptr<FramePipeline> pipeline) {
++        EXPECT_EQ(pipeline->Consume([](auto) {}), PipelineConsumeResult::Done);
++      });
++  PostTaskSync(runner, [&] {
++    auto owned_waiter = std::make_unique<Waiter>(runners);
++    waiter = owned_waiter.get();
++    animator = std::make_unique<Animator>(delegate, runners, std::move(owned_waiter));
++    animator->RequestFrame(true);
++  });
++  PostTaskSync(runner, [&] { waiter->Tick(); });
++  PostTaskSync(runner, [&] { animator->RequestFrame(false); });
++  PostTaskSync(runner, [&] {
++    EXPECT_EQ(delegate.redraws, 1);
++    EXPECT_EQ(waiter->waits, 1);
++    animator->RequestFrame(false);
++  });
++  PostTaskSync(runner, [&] {
++    EXPECT_EQ(delegate.redraws, 2);
++    EXPECT_EQ(waiter->waits, 1);
++    animator->RequestFrame(true);
++  });
++  PostTaskSync(runner, [&] {
++    EXPECT_EQ(delegate.redraws, 2);
++    EXPECT_EQ(waiter->waits, 2);
++    animator->RequestFrame(false);
++    EXPECT_EQ(delegate.redraws, 3);
++    EXPECT_EQ(waiter->waits, 2);
++    waiter->Tick();
++  });
++  PostTaskSync(runner, [&] {
++    EXPECT_EQ(delegate.redraws, 3);
++    animator.reset();
++  });
++}
++#endif
++
+ TEST_F(ShellTest, VSyncTargetTime) {
+   // Add native callbacks to listen for window.onBeginFrame
+   int64_t target_time;
+diff --git a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
+index 683d515..7a07fe3 100644
+--- a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
++++ b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h
+@@ -27,6 +27,25 @@
+                             width:(size_t)width
+                            height:(size_t)height;
+ 
+++ (sk_sp<SkImage>)wrapRGBATexture:(nonnull id<MTLTexture>)rgbaTex
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*_Nonnull)(void* _Nullable))releaseProc
++                   releaseContext:(nullable void*)releaseContext;
++
+++ (sk_sp<SkImage>)wrapYUVATexture:(nonnull id<MTLTexture>)yTex
++                            UVTex:(nonnull id<MTLTexture>)uvTex
++                    YUVColorSpace:(SkYUVColorSpace)colorSpace
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                  imageColorSpace:(sk_sp<SkColorSpace>)imageColorSpace
++                    chromaCositedX:(bool)chromaCositedX
++                    chromaCositedY:(bool)chromaCositedY
++                      releaseProc:(void (*_Nonnull)(void* _Nullable))releaseProc
++                   releaseContext:(nullable void*)releaseContext;
++
+ @end
+ 
+ @interface FlutterDarwinExternalTextureMetal : NSObject
+diff --git a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
+index b08430c..f343d56 100644
+--- a/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
++++ b/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.mm
+@@ -341,4 +341,60 @@ GrYUVABackendTextures yuvaBackendTextures(yuvaInfo, skiaBackendTextures,
+                                      /*releaseContext*/ nullptr);
+ #endif  //  SLIMPELLER
+ }
++
+++ (sk_sp<SkImage>)wrapRGBATexture:(id<MTLTexture>)rgbaTex
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                      releaseProc:(void (*)(void*))releaseProc
++                   releaseContext:(void*)releaseContext {
++#if SLIMPELLER
++  releaseProc(releaseContext);
++  return nullptr;
++#else
++  GrMtlTextureInfo textureInfo;
++  textureInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)rgbaTex};
++  GrBackendTexture backendTexture =
++      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, textureInfo);
++  return SkImages::BorrowTextureFrom(grContext, backendTexture, kTopLeft_GrSurfaceOrigin,
++                                    kBGRA_8888_SkColorType, kPremul_SkAlphaType, nullptr,
++                                    releaseProc, releaseContext);
++#endif
++}
++
+++ (sk_sp<SkImage>)wrapYUVATexture:(id<MTLTexture>)yTex
++                            UVTex:(id<MTLTexture>)uvTex
++                    YUVColorSpace:(SkYUVColorSpace)colorSpace
++                        grContext:(nonnull GrDirectContext*)grContext
++                            width:(size_t)width
++                           height:(size_t)height
++                  imageColorSpace:(sk_sp<SkColorSpace>)imageColorSpace
++                    chromaCositedX:(bool)chromaCositedX
++                    chromaCositedY:(bool)chromaCositedY
++                      releaseProc:(void (*)(void*))releaseProc
++                   releaseContext:(void*)releaseContext {
++#if SLIMPELLER
++  releaseProc(releaseContext);
++  return nullptr;
++#else
++  GrMtlTextureInfo yInfo;
++  yInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)yTex};
++  GrMtlTextureInfo uvInfo;
++  uvInfo.fTexture = sk_cfp<const void*>{(__bridge_retained const void*)uvTex};
++  GrBackendTexture textures[2] = {
++      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, yInfo),
++      GrBackendTextures::MakeMtl(uvTex.width, uvTex.height, skgpu::Mipmapped::kNo, uvInfo),
++  };
++  SkYUVAInfo yuvaInfo(textures[0].dimensions(), SkYUVAInfo::PlaneConfig::kY_UV,
++                     SkYUVAInfo::Subsampling::k420, colorSpace, kTopLeft_SkEncodedOrigin,
++                     chromaCositedX ? SkYUVAInfo::Siting::kCosited : SkYUVAInfo::Siting::kCentered,
++                     chromaCositedY ? SkYUVAInfo::Siting::kCosited : SkYUVAInfo::Siting::kCentered);
++  GrYUVABackendTextures backendTextures(yuvaInfo, textures, kTopLeft_GrSurfaceOrigin);
++  auto image = SkImages::TextureFromYUVATextures(grContext, backendTextures, std::move(imageColorSpace),
++                                               releaseProc, releaseContext);
++  // YUVA color conversion remains lazy and is fused into the eventual draw.
++  return image && image->colorSpace()
++      ? image->makeColorSpace(grContext, SkColorSpace::MakeSRGB()) : image;
++#endif
++}
+ @end
+diff --git a/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm b/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
+index 1d0a656..6dd97bb 100644
+--- a/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
++++ b/shell/platform/darwin/macos/framework/Source/FlutterEmbedderExternalTextureTest.mm
+@@ -4,6 +4,8 @@
+ 
+ #import <Foundation/Foundation.h>
+ #import <Metal/Metal.h>
++#import <CoreGraphics/CoreGraphics.h>
++#include <cmath>
+ 
+ #include <memory>
+ #include <vector>
+@@ -16,8 +18,10 @@
+ #include "flutter/shell/platform/embedder/embedder_external_texture_metal.h"
+ #include "flutter/testing/autoreleasepool_test.h"
+ #include "flutter/testing/testing.h"
++#include "flutter/fml/platform/darwin/cf_utils.h"
+ #include "third_party/googletest/googletest/include/gtest/gtest.h"
+ #include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkColorSpace.h"
+ #include "third_party/skia/include/core/SkSamplingOptions.h"
+ #include "third_party/skia/include/core/SkSurface.h"
+ #include "third_party/skia/include/gpu/ganesh/SkSurfaceGanesh.h"
+@@ -65,6 +69,65 @@ - (CVPixelBufferRef)pixelBuffer {
+ 
+ @end
+ 
++@interface KnownNv12Texture : TestExternalTexture
++@end
++
++@implementation KnownNv12Texture
++- (CVPixelBufferRef)copyPixelBuffer {
++  CVPixelBufferRef buffer = [super copyPixelBuffer];
++  CVPixelBufferLockBaseAddress(buffer, 0);
++  auto* y = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(buffer, 0));
++  auto* uv = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(buffer, 1));
++  for (size_t row = 0; row < 16; ++row) {
++    memset(y + row * CVPixelBufferGetBytesPerRowOfPlane(buffer, 0), 16 + row * 219 / 15, 16);
++  }
++  for (size_t row = 0; row < 8; ++row) {
++    memset(uv + row * CVPixelBufferGetBytesPerRowOfPlane(buffer, 1), 128, 16);
++  }
++  CVPixelBufferUnlockBaseAddress(buffer, 0);
++  NSDictionary* attachments = @{
++    (NSString*)kCVImageBufferYCbCrMatrixKey : (NSString*)kCVImageBufferYCbCrMatrix_ITU_R_601_4,
++    (NSString*)kCVImageBufferColorPrimariesKey : (NSString*)kCVImageBufferColorPrimaries_SMPTE_C,
++    (NSString*)
++    kCVImageBufferTransferFunctionKey : (NSString*)kCVImageBufferTransferFunction_ITU_R_709_2
++  };
++  CVBufferSetAttachments(buffer, (__bridge CFDictionaryRef)attachments,
++                         kCVAttachmentMode_ShouldPropagate);
++  CGColorSpaceRef color =
++      CVImageBufferCreateColorSpaceFromAttachments((__bridge CFDictionaryRef)attachments);
++  CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey, color,
++                        kCVAttachmentMode_ShouldPropagate);
++  CGColorSpaceRelease(color);
++  return buffer;
++}
++@end
++
++@interface LeftChromaNv12Texture : TestExternalTexture
++@end
++
++@implementation LeftChromaNv12Texture
++- (CVPixelBufferRef)copyPixelBuffer {
++  CVPixelBufferRef buffer = [super copyPixelBuffer];
++  CVPixelBufferLockBaseAddress(buffer, 0);
++  for (size_t row = 0; row < 16; ++row) {
++    memset(static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(buffer, 0)) +
++               row * CVPixelBufferGetBytesPerRowOfPlane(buffer, 0),
++           128, 16);
++  }
++  auto* uv = static_cast<uint8_t*>(CVPixelBufferGetBaseAddressOfPlane(buffer, 1));
++  for (size_t row = 0; row < 8; ++row) {
++    for (size_t col = 0; col < 8; ++col) {
++      uv[row * CVPixelBufferGetBytesPerRowOfPlane(buffer, 1) + col * 2] = 80 + col * 8;
++      uv[row * CVPixelBufferGetBytesPerRowOfPlane(buffer, 1) + col * 2 + 1] = 128;
++    }
++  }
++  CVPixelBufferUnlockBaseAddress(buffer, 0);
++  CVBufferSetAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey,
++                        kCVImageBufferChromaLocation_Left, kCVAttachmentMode_ShouldPropagate);
++  return buffer;
++}
++@end
++
+ namespace flutter::testing {
+ 
+ // Test-specific name for AutoreleasePoolTest fixture.
+@@ -334,4 +397,233 @@ - (CVPixelBufferRef)pixelBuffer {
+   texture->Paint(context, bounds, /*freeze=*/false, sampling);
+ }
+ 
++TEST_F(FlutterEmbedderExternalTextureTest, RejectingFrameReleasesResources) {
++  int releases = 0;
++  EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t, size_t) {
++    auto frame = std::make_unique<FlutterMetalExternalTexture>();
++    frame->struct_size = sizeof(FlutterMetalExternalTexture);
++    frame->pixel_format = FlutterMetalExternalTexturePixelFormat::kRGBA;
++    frame->user_data = &releases;
++    frame->destruction_callback = [](void* data) { ++*static_cast<int*>(data); };
++    return frame;
++  };
++  auto surface = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(16, 16));
++  DlSkCanvasAdapter canvas(surface->getCanvas());
++  flutter::Texture::PaintContext context{.canvas = &canvas};
++  std::unique_ptr<flutter::Texture> texture =
++      std::make_unique<EmbedderExternalTextureMetal>(1, callback);
++  texture->Paint(context, SkRect::MakeWH(16, 16), false, DlImageSampling::kNearestNeighbor);
++  EXPECT_EQ(releases, 1);
++  texture.reset();
++  EXPECT_EQ(releases, 1);
++}
++
++TEST_F(FlutterEmbedderExternalTextureTest, FrameResourcesSurvivePendingGPUDraw) {
++  if (!MTLCreateSystemDefaultDevice()) {
++    GTEST_SKIP() << "Metal device is unavailable";
++  }
++  for (OSType format : {kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
++                        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange}) {
++    SCOPED_TRACE(format);
++    FlutterDarwinContextMetalSkia* metal =
++        [[FlutterDarwinContextMetalSkia alloc] initWithDefaultMTLDevice];
++    GrDirectContext* gr = metal.mainContext.get();
++    auto surface =
++        SkSurfaces::RenderTarget(gr, skgpu::Budgeted::kNo, SkImageInfo::MakeN32Premul(16, 16));
++    ASSERT_NE(surface, nullptr);
++    TestExternalTexture* provider = [[TestExternalTexture alloc] initWidth:16
++                                                                    height:16
++                                                           pixelFormatType:format];
++    FlutterExternalTexture* holder = [[FlutterExternalTexture alloc] initWithFlutterTexture:provider
++                                                                         darwinMetalContext:metal];
++    auto releases = std::make_shared<int>(0);
++    struct FrameRelease {
++      VoidCallback callback;
++      void* data;
++      std::shared_ptr<int> releases;
++    };
++    EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t, size_t) {
++      auto frame = std::make_unique<FlutterMetalExternalTexture>();
++      EXPECT_TRUE([holder populateTexture:frame.get()]);
++      EXPECT_NE(frame->destruction_callback, nullptr);
++      if (frame->destruction_callback) {
++        frame->user_data =
++            new FrameRelease{frame->destruction_callback, frame->user_data, releases};
++        frame->destruction_callback = [](void* data) {
++          std::unique_ptr<FrameRelease> owner(static_cast<FrameRelease*>(data));
++          ++*owner->releases;
++          owner->callback(owner->data);
++        };
++      }
++      return frame;
++    };
++    std::unique_ptr<flutter::Texture> texture =
++        std::make_unique<EmbedderExternalTextureMetal>(1, callback);
++    DlSkCanvasAdapter canvas(surface->getCanvas());
++    flutter::Texture::PaintContext context{.canvas = &canvas, .gr_context = gr};
++    texture->Paint(context, SkRect::MakeWH(16, 16), false, DlImageSampling::kNearestNeighbor);
++    texture->MarkNewFrameAvailable();
++    texture.reset();
++    EXPECT_EQ(*releases, 0);
++    gr->flushAndSubmit(GrSyncCpu::kYes);
++    surface.reset();
++    gr->freeGpuResources();
++    EXPECT_EQ(*releases, 1);
++  }
++}
++
++TEST_F(FlutterEmbedderExternalTextureTest, NativeNv12PreservesSourceTransferFunction) {
++  if (!MTLCreateSystemDefaultDevice()) {
++    GTEST_SKIP() << "Metal device is unavailable";
++  }
++  for (bool taggedSurface : {false, true}) {
++    for (int renderSize : {16, 32}) {
++      SCOPED_TRACE(renderSize);
++      FlutterDarwinContextMetalSkia* metal =
++          [[FlutterDarwinContextMetalSkia alloc] initWithDefaultMTLDevice];
++      GrDirectContext* gr = metal.mainContext.get();
++      auto info =
++          SkImageInfo::Make(renderSize, renderSize, kRGBA_8888_SkColorType, kPremul_SkAlphaType,
++                            taggedSurface ? SkColorSpace::MakeSRGB() : nullptr);
++      auto surface = SkSurfaces::RenderTarget(gr, skgpu::Budgeted::kNo, info);
++      ASSERT_NE(surface, nullptr);
++      KnownNv12Texture* provider =
++          [[KnownNv12Texture alloc] initWidth:16
++                                       height:16
++                              pixelFormatType:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange];
++      FlutterExternalTexture* holder =
++          [[FlutterExternalTexture alloc] initWithFlutterTexture:provider darwinMetalContext:metal];
++      EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t,
++                                                                           size_t) {
++        auto frame = std::make_unique<FlutterMetalExternalTexture>();
++        EXPECT_TRUE([holder populateTexture:frame.get()]);
++        EXPECT_GT(frame->color_space_profile_size, 0u);
++        return frame;
++      };
++      EmbedderExternalTextureMetal texture(1, callback);
++      DlSkCanvasAdapter canvas(surface->getCanvas());
++      flutter::Texture::PaintContext context{.canvas = &canvas, .gr_context = gr};
++      static_cast<flutter::Texture&>(texture).Paint(context, SkRect::MakeWH(renderSize, renderSize),
++                                                    false, DlImageSampling::kNearestNeighbor);
++      gr->flushAndSubmit(GrSyncCpu::kYes);
++      uint8_t pixels[32 * 32 * 4] = {};
++      ASSERT_TRUE(surface->readPixels(info, pixels, renderSize * 4, 0, 0));
++      fml::CFRef<CVPixelBufferRef> original([provider copyPixelBuffer]);
++      fml::CFRef<CFTypeRef> sourceSpace(
++          CVBufferCopyAttachment(original, kCVImageBufferCGColorSpaceKey, nullptr));
++      fml::CFRef<CGColorSpaceRef> srgb(CGColorSpaceCreateWithName(kCGColorSpaceSRGB));
++      for (size_t row = 0; row < static_cast<size_t>(renderSize); ++row) {
++        CGFloat value = static_cast<CGFloat>((row * 16 / renderSize) * 219 / 15) / 219.0;
++        CGFloat components[] = {value, value, value, 1};
++        fml::CFRef<CGColorRef> source(
++            CGColorCreate((CGColorSpaceRef)(CFTypeRef)sourceSpace, components));
++        fml::CFRef<CGColorRef> matched(CGColorCreateCopyByMatchingToColorSpace(
++            srgb, kCGRenderingIntentDefault, source, nullptr));
++        ASSERT_TRUE(matched);
++        const CGFloat* expected = CGColorGetComponents(matched);
++        for (size_t col = 0; col < static_cast<size_t>(renderSize); ++col) {
++          for (size_t channel = 0; channel < 3; ++channel) {
++            EXPECT_NEAR(pixels[(row * renderSize + col) * 4 + channel],
++                        std::lround(expected[channel] * 255), 3);
++          }
++          EXPECT_EQ(pixels[(row * renderSize + col) * 4 + 3], 255u);
++        }
++      }
++    }
++  }
++}
++
++TEST_F(FlutterEmbedderExternalTextureTest, NativeGammaPaletteIsContinuous) {
++  FlutterDarwinContextMetalSkia* metal =
++      [[FlutterDarwinContextMetalSkia alloc] initWithDefaultMTLDevice];
++  GrDirectContext* gr = metal.mainContext.get();
++  auto ydesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR8Unorm
++      width:256 height:256 mipmapped:NO];
++  auto uvdesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG8Unorm
++      width:128 height:128 mipmapped:NO];
++  id<MTLTexture> y = [metal.device newTextureWithDescriptor:ydesc];
++  id<MTLTexture> uv = [metal.device newTextureWithDescriptor:uvdesc];
++  std::vector<uint8_t> luma(256 * 256), chroma(128 * 128 * 2);
++  for (int row = 0; row < 256; row++) {
++    for (int col = 0; col < 256; col++) {
++      luma[row * 256 + col] = 16 + (row * 13 + col * 7) % 220;
++    }
++  }
++  for (int row = 0; row < 128; row++) {
++    for (int col = 0; col < 128; col++) {
++      chroma[(row * 128 + col) * 2] = 16 + col * 224 / 127;
++      chroma[(row * 128 + col) * 2 + 1] = 16 + row * 224 / 127;
++    }
++  }
++  [y replaceRegion:MTLRegionMake2D(0, 0, 256, 256) mipmapLevel:0 withBytes:luma.data()
++      bytesPerRow:256];
++  [uv replaceRegion:MTLRegionMake2D(0, 0, 128, 128) mipmapLevel:0 withBytes:chroma.data()
++      bytesPerRow:256];
++  auto info = SkImageInfo::Make(256, 256, kRGBA_8888_SkColorType, kOpaque_SkAlphaType);
++  std::vector<uint8_t> results[2] = {std::vector<uint8_t>(256 * 256 * 4),
++                                   std::vector<uint8_t>(256 * 256 * 4)};
++  for (int i = 0; i < 2; i++) {
++    const float gamma = i == 0 ? 1.9609375f : std::nextafter(1.9609375f, 2.0f);
++    const skcms_TransferFunction transfer = {gamma, 1, 0, 0, 0, 0, 0};
++    auto image = [FlutterDarwinExternalTextureSkImageWrapper wrapYUVATexture:y UVTex:uv
++        YUVColorSpace:kRec601_Limited_SkYUVColorSpace grContext:gr width:256 height:256
++        imageColorSpace:SkColorSpace::MakeRGB(transfer, SkNamedGamut::kDisplayP3)
++        chromaCositedX:false chromaCositedY:false releaseProc:+[](void*) {} releaseContext:nullptr];
++    ASSERT_NE(image, nullptr);
++    auto surface = SkSurfaces::RenderTarget(gr, skgpu::Budgeted::kNo, info);
++    ASSERT_NE(surface, nullptr);
++    surface->getCanvas()->drawImage(image, 0, 0);
++    gr->flushAndSubmit(GrSyncCpu::kYes);
++    ASSERT_TRUE(surface->readPixels(info, results[i].data(), 256 * 4, 0, 0));
++  }
++  int max_delta = 0;
++  for (size_t i = 0; i < results[0].size(); i++) {
++    max_delta = std::max(max_delta, std::abs(int(results[0][i]) - int(results[1][i])));
++  }
++  EXPECT_LE(max_delta, 1);
++  printf("NATIVE_GAMMA_PALETTE pixels=65536 max_code_delta=%d\n", max_delta);
++}
++
++TEST_F(FlutterEmbedderExternalTextureTest, NativeNv12PreservesLeftChromaSiting) {
++  if (!MTLCreateSystemDefaultDevice()) {
++    GTEST_SKIP() << "Metal device is unavailable";
++  }
++  FlutterDarwinContextMetalSkia* metal =
++      [[FlutterDarwinContextMetalSkia alloc] initWithDefaultMTLDevice];
++  GrDirectContext* gr = metal.mainContext.get();
++  auto info = SkImageInfo::Make(16, 16, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
++  auto surface = SkSurfaces::RenderTarget(gr, skgpu::Budgeted::kNo, info);
++  ASSERT_NE(surface, nullptr);
++  LeftChromaNv12Texture* provider =
++      [[LeftChromaNv12Texture alloc] initWidth:16
++                                        height:16
++                               pixelFormatType:kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange];
++  FlutterExternalTexture* holder = [[FlutterExternalTexture alloc] initWithFlutterTexture:provider
++                                                                       darwinMetalContext:metal];
++  EmbedderExternalTextureMetal::ExternalTextureCallback callback = [&](int64_t, size_t, size_t) {
++    auto frame = std::make_unique<FlutterMetalExternalTexture>();
++    EXPECT_TRUE([holder populateTexture:frame.get()]);
++    EXPECT_TRUE(frame->chroma_cosited_x);
++    return frame;
++  };
++  std::unique_ptr<flutter::Texture> texture =
++      std::make_unique<EmbedderExternalTextureMetal>(1, callback);
++  DlSkCanvasAdapter canvas(surface->getCanvas());
++  flutter::Texture::PaintContext context{.canvas = &canvas, .gr_context = gr};
++  texture->Paint(context, SkRect::MakeWH(16, 16), false, DlImageSampling::kNearestNeighbor);
++  gr->flushAndSubmit(GrSyncCpu::kYes);
++  uint8_t pixels[16 * 16 * 4] = {};
++  ASSERT_TRUE(surface->readPixels(info, pixels, 16 * 4, 0, 0));
++  for (size_t row = 0; row < 16; ++row) {
++    for (size_t col = 0; col < 16; ++col) {
++      const double u = std::min(80.0 + col * 4.0, 136.0) - 128.0;
++      const double luma = (128.0 - 16.0) * 255.0 / 219.0;
++      EXPECT_NEAR(pixels[(row * 16 + col) * 4], std::lround(luma), 3);
++      EXPECT_NEAR(pixels[(row * 16 + col) * 4 + 1], std::lround(luma - 0.39176229 * u), 3);
++      EXPECT_NEAR(pixels[(row * 16 + col) * 4 + 2], std::lround(luma + 2.01723214 * u), 3);
++      EXPECT_EQ(pixels[(row * 16 + col) * 4 + 3], 255u);
++    }
++  }
++}
++
+ }  // namespace flutter::testing
+diff --git a/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm b/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
+index e15cd4e..a0f3082 100644
+--- a/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
++++ b/shell/platform/darwin/macos/framework/Source/FlutterExternalTexture.mm
+@@ -6,6 +6,27 @@
+ 
+ #include "flutter/fml/platform/darwin/cf_utils.h"
+ 
++namespace {
++struct ExternalTextureFrame {
++  fml::CFRef<CVMetalTextureRef> metal_texture;
++  fml::CFRef<CVPixelBufferRef> pixel_buffer;
++};
++
++void ReleaseExternalTextureFrame(void* context) {
++  delete static_cast<ExternalTextureFrame*>(context);
++}
++struct ExternalYuvTextureFrame {
++  fml::CFRef<CVMetalTextureRef> y_texture;
++  fml::CFRef<CVMetalTextureRef> uv_texture;
++  fml::CFRef<CVPixelBufferRef> pixel_buffer;
++  fml::CFRef<CFDataRef> color_profile;
++};
++
++void ReleaseExternalYuvTextureFrame(void* context) {
++  delete static_cast<ExternalYuvTextureFrame*>(context);
++}
++}  // namespace
++
+ @implementation FlutterExternalTexture {
+   FlutterDarwinContextMetalSkia* _darwinMetalContext;
+ 
+@@ -14,6 +35,8 @@ @implementation FlutterExternalTexture {
+   id<FlutterTexture> _texture;
+ 
+   std::vector<FlutterMetalTextureHandle> _textures;
++  fml::CFRef<CFTypeRef> _nv12ColorSpace;
++  fml::CFRef<CFDataRef> _nv12ColorProfile;
+ }
+ 
+ - (instancetype)initWithFlutterTexture:(id<FlutterTexture>)texture
+@@ -39,6 +62,13 @@ - (BOOL)populateTexture:(FlutterMetalExternalTexture*)textureOut {
+     return NO;
+   }
+ 
++  static const bool traceFrames = getenv("RUSTDESK_FRAME_TRACE") != nullptr;
++  if (traceFrames) {
++    CFTypeRef tag = CVBufferGetAttachment(pixelBuffer, CFSTR("RDFrameTrace"), nullptr);
++    if (tag) fprintf(stderr, "RD_FRAME stage=acquire tag=%s t=%.9f\n",
++        [(__bridge NSString*)tag UTF8String], NSProcessInfo.processInfo.systemUptime);
++  }
++
+   OSType pixel_format = CVPixelBufferGetPixelFormatType(pixelBuffer);
+   if (pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+       pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
+@@ -91,11 +121,46 @@ - (BOOL)populateTextureFromYUVAPixelBuffer:(nonnull CVPixelBufferRef)pixelBuffer
+     return NO;
+   }
+ 
++  static const bool traceFrames = getenv("RUSTDESK_FRAME_TRACE") != nullptr;
++  if (traceFrames) {
++    CFTypeRef tag = CVBufferGetAttachment(pixelBuffer, CFSTR("RDFrameTrace"), nullptr);
++    if (tag) {
++      CVMetalTextureGetTexture(yCVMetalTexture).label = (__bridge NSString*)tag;
++      CVMetalTextureGetTexture(uvCVMetalTextureRef).label = (__bridge NSString*)tag;
++    }
++  }
+   _textures = {(__bridge FlutterMetalTextureHandle)CVMetalTextureGetTexture(yCVMetalTexture),
+                (__bridge FlutterMetalTextureHandle)CVMetalTextureGetTexture(uvCVMetalTextureRef)};
+-  CVBufferRelease(yCVMetalTexture);
+-  CVBufferRelease(uvCVMetalTextureRef);
+-
++  fml::CFRef<CFTypeRef> sourceColorSpace(
++      CVBufferCopyAttachment(pixelBuffer, kCVImageBufferCGColorSpaceKey, nullptr));
++  if (sourceColorSpace && CFGetTypeID(sourceColorSpace) == CGColorSpaceGetTypeID()) {
++    if (!_nv12ColorSpace || !CFEqual(_nv12ColorSpace, sourceColorSpace)) {
++      _nv12ColorProfile.Reset(CGColorSpaceCopyICCData((CGColorSpaceRef)(CFTypeRef)sourceColorSpace));
++      _nv12ColorSpace = std::move(sourceColorSpace);
++    }
++  } else {
++    _nv12ColorSpace.Reset();
++    _nv12ColorProfile.Reset();
++  }
++  auto* frame = new ExternalYuvTextureFrame{
++      fml::CFRef<CVMetalTextureRef>(yCVMetalTexture),
++      fml::CFRef<CVMetalTextureRef>(uvCVMetalTextureRef),
++      fml::CFRef<CVPixelBufferRef>(CVPixelBufferRetain(pixelBuffer)),
++      _nv12ColorProfile};
++
++  textureOut->struct_size = sizeof(FlutterMetalExternalTexture);
++  textureOut->user_data = frame;
++  textureOut->destruction_callback = ReleaseExternalYuvTextureFrame;
++  textureOut->color_space_profile = _nv12ColorProfile ? CFDataGetBytePtr(_nv12ColorProfile) : nullptr;
++  textureOut->color_space_profile_size = _nv12ColorProfile ? CFDataGetLength(_nv12ColorProfile) : 0;
++  fml::CFRef<CFTypeRef> siting(CVBufferCopyAttachment(pixelBuffer,
++      kCVImageBufferChromaLocationTopFieldKey, nullptr));
++  textureOut->chroma_cosited_x = siting &&
++      (CFEqual(siting, kCVImageBufferChromaLocation_Left) ||
++       CFEqual(siting, kCVImageBufferChromaLocation_TopLeft));
++  textureOut->chroma_cosited_y = siting &&
++      (CFEqual(siting, kCVImageBufferChromaLocation_Top) ||
++       CFEqual(siting, kCVImageBufferChromaLocation_TopLeft));
+   textureOut->num_textures = 2;
+   textureOut->height = textureSize.height();
+   textureOut->width = textureSize.width();
+@@ -132,13 +197,18 @@ - (BOOL)populateTextureFromRGBAPixelBuffer:(nonnull CVPixelBufferRef)pixelBuffer
+   }
+ 
+   _textures = {(__bridge FlutterMetalTextureHandle)CVMetalTextureGetTexture(cvMetalTexture)};
+-  CVBufferRelease(cvMetalTexture);
++  // Retaining only id<MTLTexture> does not keep its Core Video backing alive.
++  auto* frame = new ExternalTextureFrame{fml::CFRef<CVMetalTextureRef>(cvMetalTexture),
++                                         fml::CFRef<CVPixelBufferRef>(CVPixelBufferRetain(pixelBuffer))};
+ 
++  textureOut->struct_size = sizeof(FlutterMetalExternalTexture);
+   textureOut->num_textures = 1;
+   textureOut->height = textureSize.height();
+   textureOut->width = textureSize.width();
+   textureOut->pixel_format = FlutterMetalExternalTexturePixelFormat::kRGBA;
+   textureOut->textures = _textures.data();
++  textureOut->user_data = frame;
++  textureOut->destruction_callback = ReleaseExternalTextureFrame;
+ 
+   return YES;
+ }
+diff --git a/shell/platform/darwin/macos/framework/Source/FlutterSurfaceManager.mm b/shell/platform/darwin/macos/framework/Source/FlutterSurfaceManager.mm
+index d87aed4..d697172 100644
+--- a/shell/platform/darwin/macos/framework/Source/FlutterSurfaceManager.mm
++++ b/shell/platform/darwin/macos/framework/Source/FlutterSurfaceManager.mm
+@@ -218,9 +218,18 @@ static CGSize GetRequiredFrameSize(NSArray<FlutterSurfacePresentInfo*>* surfaces
+ - (void)presentSurfaces:(NSArray<FlutterSurfacePresentInfo*>*)surfaces
+                  atTime:(CFTimeInterval)presentationTime
+                  notify:(dispatch_block_t)notify {
++  static const bool traceFrames = getenv("RUSTDESK_FRAME_TRACE") != nullptr;
++  const double requested = NSProcessInfo.processInfo.systemUptime;
++  if (traceFrames) for (FlutterSurfacePresentInfo* info in surfaces) {
++    fprintf(stderr, "RD_FRAME stage=present_request surface=%p request=%.9f target=%.9f t=%.9f\n",
++        info.surface.asFlutterMetalTexture.texture, requested, presentationTime,
++        NSProcessInfo.processInfo.systemUptime);
++  }
+   id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
+   [commandBuffer commit];
+   [commandBuffer waitUntilScheduled];
++  if (traceFrames) fprintf(stderr, "RD_FRAME stage=scheduled request=%.9f t=%.9f\n",
++      requested, NSProcessInfo.processInfo.systemUptime);
+ 
+   dispatch_block_t presentBlock = ^{
+     // Get the actual dimensions of the frame (relevant for thread synchronizer).
+@@ -228,6 +237,11 @@ - (void)presentSurfaces:(NSArray<FlutterSurfacePresentInfo*>*)surfaces
+     [_delegate onPresent:size
+                withBlock:^{
+                  _lastPresentationTime = presentationTime;
++                 if (traceFrames) for (FlutterSurfacePresentInfo* info in surfaces) {
++                   fprintf(stderr, "RD_FRAME stage=ca_commit surface=%p request=%.9f t=%.9f\n",
++                       info.surface.asFlutterMetalTexture.texture, requested,
++                       NSProcessInfo.processInfo.systemUptime);
++                 }
+                  [self commit:surfaces];
+                  if (notify != nil) {
+                    notify();
+diff --git a/shell/platform/embedder/BUILD.gn b/shell/platform/embedder/BUILD.gn
+index 39ca8dc..01d0d50 100644
+--- a/shell/platform/embedder/BUILD.gn
++++ b/shell/platform/embedder/BUILD.gn
+@@ -162,7 +162,10 @@ template("embedder_source_set") {
+       cflags_objc = flutter_cflags_objc
+       cflags_objcc = flutter_cflags_objcc
+ 
+-      deps += [ "//flutter/shell/platform/darwin/graphics" ]
++      deps += [
++        "//flutter/shell/platform/darwin/graphics",
++        "//flutter/skia/modules/skcms",
++      ]
+     }
+ 
+     if (embedder_enable_vulkan) {
+diff --git a/shell/platform/embedder/embedder.h b/shell/platform/embedder/embedder.h
+index 069c813..492806e 100644
+--- a/shell/platform/embedder/embedder.h
++++ b/shell/platform/embedder/embedder.h
+@@ -635,6 +635,20 @@ typedef struct {
+   FlutterMetalTextureHandle* textures;
+   /// The YUV color space of the YUV external texture.
+   FlutterMetalExternalTextureYUVColorSpace yuv_color_space;
++  /// Optional per-frame resources that must remain valid while the GPU uses
++  /// these textures. Passed to destruction_callback when they can be released.
++  void* user_data;
++  /// Optional callback invoked exactly once when this frame's textures are no
++  /// longer in use, or immediately if the frame cannot be wrapped. May run on
++  /// the raster thread. Older struct sizes retain the existing behavior.
++  VoidCallback destruction_callback;
++  /// ICC profile describing the RGB values reconstructed from a YUV frame.
++  /// The frame owner retains these bytes until destruction_callback runs.
++  const uint8_t* color_space_profile;
++  size_t color_space_profile_size;
++  /// Whether the chroma samples align with the first luma sample in each block.
++  bool chroma_cosited_x;
++  bool chroma_cosited_y;
+ } FlutterMetalExternalTexture;
+ 
+ /// Callback to provide an external texture for a given texture_id.
+diff --git a/shell/platform/embedder/embedder_external_texture_metal.mm b/shell/platform/embedder/embedder_external_texture_metal.mm
+index 4e825e8..19e5c9a 100644
+--- a/shell/platform/embedder/embedder_external_texture_metal.mm
++++ b/shell/platform/embedder/embedder_external_texture_metal.mm
+@@ -6,8 +6,11 @@
+ 
+ #include "flow/layers/layer.h"
+ #include "flutter/fml/logging.h"
++#include "flutter/shell/platform/embedder/embedder_struct_macros.h"
+ #import "flutter/shell/platform/darwin/graphics/FlutterDarwinExternalTextureMetal.h"
+ #include "third_party/skia/include/core/SkImage.h"
++#include "third_party/skia/include/core/SkColorSpace.h"
++#include "third_party/skia/modules/skcms/skcms.h"
+ #include "third_party/skia/include/core/SkSize.h"
+ #include "third_party/skia/include/gpu/GrBackendSurface.h"
+ #include "third_party/skia/include/gpu/GrDirectContext.h"
+@@ -65,11 +68,24 @@ static bool ValidNumTextures(int expected, int actual) {
+   }
+ 
+   sk_sp<SkImage> image;
++  auto* texture_ptr = texture.get();
++  VoidCallback release_callback = SAFE_ACCESS(texture_ptr, destruction_callback, nullptr);
++  void* release_context = SAFE_ACCESS(texture_ptr, user_data, nullptr);
+ 
+   switch (texture->pixel_format) {
+     case FlutterMetalExternalTexturePixelFormat::kRGBA: {
+       if (ValidNumTextures(1, texture->num_textures)) {
+         id<MTLTexture> rgbaTex = (__bridge id<MTLTexture>)texture->textures[0];
++        if (release_callback) {
++          image = [FlutterDarwinExternalTextureSkImageWrapper wrapRGBATexture:rgbaTex
++                                                                   grContext:context
++                                                                       width:size.width()
++                                                                      height:size.height()
++                                                                 releaseProc:release_callback
++                                                              releaseContext:release_context];
++          release_callback = nullptr;
++          break;
++        }
+         image = [FlutterDarwinExternalTextureSkImageWrapper wrapRGBATexture:rgbaTex
+                                                                   grContext:context
+                                                                       width:size.width()
+@@ -85,6 +101,34 @@ static bool ValidNumTextures(int expected, int actual) {
+             texture->yuv_color_space == FlutterMetalExternalTextureYUVColorSpace::kBT601LimitedRange
+                 ? kRec601_Limited_SkYUVColorSpace
+                 : kJPEG_Full_SkYUVColorSpace;
++        if (release_callback) {
++          sk_sp<SkColorSpace> source_color_space;
++          if (texture->color_space_profile && texture->color_space_profile_size) {
++            skcms_ICCProfile profile;
++            if (!skcms_Parse(texture->color_space_profile, texture->color_space_profile_size, &profile)) {
++              FML_LOG(ERROR) << "Invalid YUV source ICC profile";
++              break;
++            }
++            source_color_space = SkColorSpace::Make(profile);
++            if (!source_color_space) {
++              FML_LOG(ERROR) << "Unsupported YUV source ICC profile";
++              break;
++            }
++          }
++          image = [FlutterDarwinExternalTextureSkImageWrapper wrapYUVATexture:yTex
++                                                                       UVTex:uvTex
++                                                               YUVColorSpace:colorSpace
++                                                                   grContext:context
++                                                                       width:texture->width
++                                                                      height:texture->height
++                                                              imageColorSpace:std::move(source_color_space)
++                                                                chromaCositedX:texture->chroma_cosited_x
++                                                                chromaCositedY:texture->chroma_cosited_y
++                                                                 releaseProc:release_callback
++                                                              releaseContext:release_context];
++          release_callback = nullptr;
++          break;
++        }
+         image = [FlutterDarwinExternalTextureSkImageWrapper wrapYUVATexture:yTex
+                                                                       UVTex:uvTex
+                                                               YUVColorSpace:colorSpace
+@@ -96,6 +140,10 @@ static bool ValidNumTextures(int expected, int actual) {
+     }
+   }
+ 
++  if (release_callback) {
++    release_callback(release_context);
++  }
++
+   if (!image) {
+     FML_LOG(ERROR) << "Could not create external texture: " << texture_id;
+   }

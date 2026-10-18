@@ -260,6 +260,9 @@ struct RgbaData {
     valid: bool,
 }
 
+#[cfg(all(target_os = "macos", feature = "hwcodec"))]
+mod macos_pixelbuffer;
+
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
     texture_rgba: *mut c_void,
     buffer: *const u8,
@@ -458,6 +461,8 @@ impl VideoRenderer {
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn on_rgba(&self, display: usize, rgba: &scrap::ImageRgb) -> bool {
+        #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+        if rgba.native.is_some() { return self.on_macos_pixelbuffer(display, rgba); }
         let mut write_lock = self.map_display_sessions.write().unwrap();
         let opt_info = if !self.is_support_multi_ui_session {
             write_lock.values_mut().next()

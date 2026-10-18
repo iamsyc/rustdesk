@@ -406,3 +406,6 @@ mod tests {
         );
     }
 }
+
+/// Per-peer receive pacing for low-RTT desktop connections.
+pub const OPTION_VIDEO_ACK_REQUIRED: &str = "video-ack-required";

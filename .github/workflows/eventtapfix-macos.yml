@@ -74,21 +74,24 @@ jobs:
             ./flutter/lib/generated_bridge.freezed.dart
             ./flutter/macos/Runner/bridge_generated.h
 
+  macos-engine-sdk:
+    uses: ./.github/workflows/macos-engine-sdk.yml
+
   build-macos:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
+          - runner: macos-26
             target: aarch64-apple-darwin
             arch: arm64
             package_arch: aarch64
-          - runner: macos-15-intel
+          - runner: macos-26-intel
             target: x86_64-apple-darwin
             arch: x86_64
             package_arch: x86_64
     runs-on: ${{ matrix.runner }}
-    needs: generate-bridge
+    needs: [generate-bridge, macos-engine-sdk]
     steps:
       - name: Export GitHub Actions cache variables
         uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410
@@ -203,6 +206,9 @@ jobs:
           else:
               raise SystemExit("No hardware regression test executable was produced")
           PYCODE
+
+      - name: Prepare native texture engine
+        uses: ./.github/actions/macos-native-engine
 
       - name: Compile patched RustDesk
         run: |

@@ -1,0 +1,105 @@
+diff --git a/runtime/platform/utils_macos.cc b/runtime/platform/utils_macos.cc
+index 082c1ce4..97d01fc8 100644
+--- a/runtime/platform/utils_macos.cc
++++ b/runtime/platform/utils_macos.cc
+@@ -9,7 +9,7 @@
+ #include "platform/utils_macos.h"
+ 
+ #include <errno.h>        // NOLINT
+-#include <sys/utsname.h>  // NOLINT
++#include <sys/sysctl.h>   // NOLINT
+ 
+ namespace dart {
+ 
+@@ -81,80 +81,19 @@ int Utils::Unlink(const char* path) {
+ 
+ namespace internal {
+ 
+-// Returns the running system's Darwin major version. Don't call this, it's
+-// an implementation detail and its result is meant to be cached by
+-// MacOSXMinorVersion.
+-int32_t DarwinMajorVersionInternal() {
+-  // uname is implemented as a simple series of sysctl system calls to
+-  // obtain the relevant data from the kernel. The data is
+-  // compiled right into the kernel, so no threads or blocking or other
+-  // funny business is necessary.
+-
+-  struct utsname uname_info;
+-  if (uname(&uname_info) != 0) {
+-    FATAL("Fatal error in DarwinMajorVersionInternal : invalid return uname");
+-    return 0;
+-  }
+-
+-  if (strcmp(uname_info.sysname, "Darwin") != 0) {
+-    FATAL(
+-        "Fatal error in DarwinMajorVersionInternal : unexpected uname"
+-        " sysname '%s'",
+-        uname_info.sysname);
+-    return 0;
+-  }
+-
+-  int32_t darwin_major_version = 0;
+-  char* dot = strchr(uname_info.release, '.');
+-  if (dot) {
+-    errno = 0;
+-    char* end_ptr = nullptr;
+-    darwin_major_version = strtol(uname_info.release, &end_ptr, 10);
+-    if (errno != 0 || (end_ptr == uname_info.release)) {
+-      dot = nullptr;
+-    }
+-  }
+-
+-  if (!dot) {
+-    FATAL(
+-        "Fatal error in DarwinMajorVersionInternal :"
+-        " could not parse uname release '%s'",
+-        uname_info.release);
+-    return 0;
+-  }
+-
+-  return darwin_major_version;
+-}
+-
+-// Returns the running system's Mac OS X version which matches the encoding
+-// of MAC_OS_X_VERSION_* defines in AvailabilityMacros.h
++// Read the product version, including the minor release required by this build.
+ int32_t MacOSXVersionInternal() {
+-  const int32_t darwin_major_version = DarwinMajorVersionInternal();
+-
+-  int32_t major_version;
+-  int32_t minor_version;
+-
+-  if (darwin_major_version < 20) {
+-    // For Mac OS X 10.* minor version is off by 4 from Darwin's major
+-    // version, e.g. 5.* is v10.1.*, 6.* is v10.2.* and so on.
+-    // Pretend that anything below Darwin v5 is just Mac OS X Cheetah (v10.0).
+-    major_version = 10;
+-    minor_version = Utils::Maximum(0, darwin_major_version - 4);
+-  } else {
+-    // Starting from Darwin v20 major version increment in lock-step:
+-    // Darwin v20 - Mac OS X v11, Darwin v21 - Mac OS X v12, etc
+-    major_version = (darwin_major_version - 9);
+-    minor_version = 0;
++  char product_version[32] = {};
++  size_t length = sizeof(product_version);
++  if (sysctlbyname("kern.osproductversion", product_version, &length, nullptr, 0) != 0) {
++    FATAL("Could not read macOS product version");
+   }
+-
+-  // Caveat: MAC_OS_X_VERSION_* is encoded using decimal encoding.
+-  // Starting at MAC_OS_X_VERSION_10_10 versions use 2 decimal digits for
+-  // minor version and patch number.
+-  const int32_t field_multiplier = (darwin_major_version < 14) ? 10 : 100;
+-  const int32_t major_multiplier = field_multiplier * field_multiplier;
+-  const int32_t minor_multiplier = field_multiplier;
+-
+-  return major_version * major_multiplier + minor_version * minor_multiplier;
++  int major = 0;
++  int minor = 0;
++  if (sscanf(product_version, "%d.%d", &major, &minor) != 2) {
++    FATAL("Could not parse macOS product version '%s'", product_version);
++  }
++  return major * 10000 + minor * 100;
+ }
+ 
+ int32_t MacOSXVersion() {

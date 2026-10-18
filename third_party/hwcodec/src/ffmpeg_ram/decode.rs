@@ -3,6 +3,9 @@ use super::Priority;
 use crate::common::TEST_TIMEOUT_MS;
 use crate::ffmpeg::{init_av_log, AVHWDeviceType::*};
 
+#[cfg(target_os = "macos")]
+pub mod native;
+
 use crate::{
     common::DataFormat::*,
     ffmpeg::{AVHWDeviceType, AVPixelFormat},

@@ -433,6 +433,30 @@ impl Encoder {
 }
 
 impl Decoder {
+    #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+    pub fn handle_macos_native_frame(
+        &mut self, frame: &video_frame::Union, rgb: &mut ImageRgb,
+    ) -> Option<ResultType<bool>> {
+        let (decoder, frames) = match frame {
+            video_frame::Union::H264s(frames) => (self.h264_ram.as_mut()?, frames),
+            video_frame::Union::H265s(frames) => (self.h265_ram.as_mut()?, frames),
+            _ => return None,
+        };
+        if decoder.info.hwdevice != ::hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX {
+            return None;
+        }
+        Some((|| {
+            for packet in &frames.frames {
+                if let Some(frame) = decoder.decode_native(&packet.data)? {
+                    rgb.w = frame.width as _;
+                    rgb.h = frame.height as _;
+                    rgb.native = Some(frame);
+                }
+            }
+            Ok(rgb.native.is_some())
+        })())
+    }
+
     pub fn supported_decodings(
         id_for_perfer: Option<&str>,
         _use_texture_render: bool,
