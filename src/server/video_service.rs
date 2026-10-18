@@ -727,6 +727,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let repeat_encode_max = 10;
     let mut encode_fail_counter = 0;
     let mut first_frame = true;
+    let encoder_started = Instant::now();
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
@@ -743,7 +744,11 @@ fn run(vs: VideoService) -> ResultType<()> {
             &mut second_instant,
             &sp.name(),
         )?;
-        if sp.is_option_true(OPTION_REFRESH) {
+        let warming_up = cfg!(target_os = "macos")
+            && first_frame
+            && !encoder.latency_free()
+            && encoder_started.elapsed() < Duration::from_secs(1);
+        if sp.is_option_true(OPTION_REFRESH) && !warming_up {
             if vs.source.is_monitor() {
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
@@ -1270,6 +1275,9 @@ fn handle_one_frame(
                 .as_mut()
                 .map(|r| r.write_message(&msg, width, height));
             send_conn_ids = sp.send_video_frame(msg);
+        }
+        Err(e) if e.is::<scrap::codec::EncodePending>() => {
+            *first_frame = first;
         }
         Err(e) => {
             *encode_fail_counter += 1;

@@ -1,0 +1,24 @@
+name: Prepare pinned macOS engine SDK
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-sdk:
+    runs-on: macos-15
+    steps:
+      - name: Archive the engine compiler SDK
+        shell: bash
+        run: |
+          sdk="$(DEVELOPER_DIR=/Applications/Xcode_16.3.app/Contents/Developer xcrun --sdk macosx --show-sdk-path)"
+          tar -czf "${RUNNER_TEMP}/macos-engine-sdk.tar.gz" -C "$sdk" .
+
+      - name: Pass SDK to engine build hosts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-engine-sdk-15.4
+          path: ${{ runner.temp }}/macos-engine-sdk.tar.gz
+          retention-days: 1

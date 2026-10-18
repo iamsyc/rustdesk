@@ -1,17 +1,17 @@
 use crate::{quartz, Frame, Pixfmt};
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::{io, mem};
 
 pub struct Capturer {
     inner: quartz::Capturer,
-    frame: Arc<Mutex<Option<quartz::Frame>>>,
+    frame: Arc<(Mutex<Option<quartz::Frame>>, Condvar)>,
     saved_raw_data: Vec<u8>, // for faster compare and copy
 }
 
 impl Capturer {
     pub fn new(display: Display) -> io::Result<Capturer> {
-        let frame = Arc::new(Mutex::new(None));
+        let frame = Arc::new((Mutex::new(None), Condvar::new()));
 
         let f = frame.clone();
         let inner = quartz::Capturer::new(
@@ -21,8 +21,9 @@ impl Capturer {
             quartz::PixelFormat::Argb8888,
             Default::default(),
             move |inner| {
-                if let Ok(mut f) = f.lock() {
-                    *f = Some(inner);
+                if let Ok(mut frame) = f.0.lock() {
+                    *frame = Some(inner);
+                    f.1.notify_one();
                 }
             },
         )
@@ -45,16 +46,22 @@ impl Capturer {
 }
 
 impl crate::TraitCapturer for Capturer {
-    fn frame<'a>(&'a mut self, _timeout_ms: std::time::Duration) -> io::Result<Frame<'a>> {
-        match self.frame.try_lock() {
-            Ok(mut handle) => {
+    fn frame<'a>(&'a mut self, timeout: std::time::Duration) -> io::Result<Frame<'a>> {
+        match self.frame.0.try_lock() {
+            Ok(handle) => {
+                let (mut handle, _) = self
+                    .frame
+                    .1
+                    .wait_timeout_while(handle, timeout, |frame| frame.is_none())
+                    .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
                 let mut frame = None;
                 mem::swap(&mut frame, &mut handle);
+                drop(handle);
 
                 match frame {
                     Some(mut frame) => {
                         crate::would_block_if_equal(&mut self.saved_raw_data, frame.inner())?;
-                        frame.surface_to_bgra(self.height());
+                        frame.map_bgra(self.height());
                         Ok(Frame::PixelBuffer(PixelBuffer {
                             frame,
                             data: PhantomData,

@@ -30,6 +30,9 @@ vcpkg_from_github(
     patch/0010.disable-loading-DLLs-from-app-dir.patch
     patch/0011-android-mediacodec-encode-align-64.patch
     patch/0012-fix-macos-big-sur-CVBufferCopyAttachments.patch
+    patch/0013-cache-macos-decoder-colorspace.patch
+    patch/0014-enable-macos-asynchronous-decode.patch
+    patch/0015-use-macos-metal-decoder-surfaces.patch
 )
 
 if(SOURCE_PATH MATCHES " ")
@@ -169,6 +172,8 @@ elseif(VCPKG_TARGET_IS_WINDOWS)
     endif()
 elseif(VCPKG_TARGET_IS_OSX)
     string(APPEND OPTIONS "\
+--extra-cflags=-mmacosx-version-min=15.8 \
+--extra-ldflags=-mmacosx-version-min=15.8 \
 --disable-autodetect \
 --enable-videotoolbox \
 --enable-encoder=h264_videotoolbox,hevc_videotoolbox \

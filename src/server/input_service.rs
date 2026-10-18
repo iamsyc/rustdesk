@@ -1590,16 +1590,57 @@ pub fn handle_key(evt: &KeyEvent) {
 #[cfg(target_os = "macos")]
 pub fn handle_key(evt: &KeyEvent) {
     // having GUI, run main GUI thread, otherwise crash
+    let paced = macos_key_needs_pacing(evt);
     let evt = evt.clone();
     QUEUE.exec_async(move || handle_key_(&evt));
-    // Key sleep is required for macOS.
-    // If we don't sleep, the key press/release events may not take effect.
-    //
-    // For example, the controlled side osx `12.7.6` or `15.1.1`
-    // If we input characters quickly and continuously, and press or release "Shift" for a short period of time,
-    // it is possible that after releasing "Shift", the controlled side will still print uppercase characters.
-    // Though it is not very easy to reproduce.
-    key_sleep();
+    // Quartz updates source modifier flags asynchronously. Keep the barrier for
+    // those transitions, without pacing ordinary mapped text behind each other.
+    if paced {
+        key_sleep();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_key_needs_pacing(evt: &KeyEvent) -> bool {
+    !matches!(
+        (evt.mode.enum_value(), evt.union.as_ref()),
+        (Ok(KeyboardMode::Map), Some(key_event::Union::Chr(code)))
+            if *code <= rdev::kVK_Delete as u32
+    )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_key_pacing_tests {
+    use super::*;
+
+    #[test]
+    fn mapped_text_can_drain_without_waiting_between_keys() {
+        let mut event = KeyEvent::new();
+        event.mode = KeyboardMode::Map.into();
+        for code in [rdev::kVK_ANSI_A, rdev::kVK_ANSI_B, rdev::kVK_Space, rdev::kVK_Delete] {
+            event.set_chr(code as _);
+            for down in [true, false] {
+                event.down = down;
+                assert!(!macos_key_needs_pacing(&event));
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_and_non_map_paths_keep_their_barrier() {
+        let mut event = KeyEvent::new();
+        event.mode = KeyboardMode::Map.into();
+        for code in [rdev::kVK_Shift, rdev::kVK_RightShift, rdev::kVK_Command, rdev::kVK_CapsLock, rdev::kVK_Function, rdev::kVK_LeftArrow] {
+            event.set_chr(code as _);
+            for down in [true, false] {
+                event.down = down;
+                assert!(macos_key_needs_pacing(&event));
+            }
+        }
+        event.mode = KeyboardMode::Translate.into();
+        event.set_chr(rdev::kVK_ANSI_A as _);
+        assert!(macos_key_needs_pacing(&event));
+    }
 }
 
 #[cfg(target_os = "macos")]

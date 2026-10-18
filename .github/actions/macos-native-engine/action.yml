@@ -1,0 +1,41 @@
+name: Patched macOS texture engine
+description: Build the pinned engine required by the native NV12 renderer
+runs:
+  using: composite
+  steps:
+    - name: Cache patched framework
+      id: engine-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: ${{ runner.temp }}/rustdesk-native-engine/FlutterMacOS.framework
+        key: native-engine-a18df97-${{ runner.arch }}-${{ hashFiles('.github/patches/flutter-*-3.24.5-*.diff', 'scripts/build-macos-native-texture-engine.sh') }}
+
+    - name: Download the engine compiler SDK
+      if: steps.engine-cache.outputs.cache-hit != 'true'
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        name: macos-engine-sdk-15.4
+        path: ${{ runner.temp }}/rustdesk-engine-sdk
+
+    - name: Compile native texture engine
+      if: steps.engine-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        brew install ninja
+        workspace="${RUNNER_TEMP}/rustdesk-engine-source"
+        sdk="${RUNNER_TEMP}/rustdesk-engine-sdk/MacOSX15.4.sdk"
+        mkdir -p "$sdk"
+        tar -xzf "${RUNNER_TEMP}/rustdesk-engine-sdk/macos-engine-sdk.tar.gz" -C "$sdk"
+        bash scripts/build-macos-native-texture-engine.sh "$workspace" "$sdk" prepare
+        bash scripts/build-macos-native-texture-engine.sh "$workspace" "$sdk" compile
+        output=host_release
+        if [[ "$(uname -m)" == arm64 ]]; then output=host_release_arm64; fi
+        mkdir -p "${RUNNER_TEMP}/rustdesk-native-engine"
+        ditto "$workspace/src/out/$output/FlutterMacOS.framework" \
+          "${RUNNER_TEMP}/rustdesk-native-engine/FlutterMacOS.framework"
+
+    - name: Configure macOS packaging
+      shell: bash
+      run: |
+        echo "RUSTDESK_FLUTTER_ENGINE=${RUNNER_TEMP}/rustdesk-native-engine/FlutterMacOS.framework" >> "$GITHUB_ENV"
+        echo "RUSTDESK_ADHOC_SIGN=1" >> "$GITHUB_ENV"

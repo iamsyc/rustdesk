@@ -269,10 +269,16 @@ impl<T: InvokeUiSession> Remote<T> {
                 let mut webrtc_suspect_since: Option<Instant> = None;
                 let mut last_rx_progress = peer.rx_progress();
                 let mut peer_gone = false;
+                #[cfg(target_os = "macos")]
+                let mut pending_ui = None;
 
                 loop {
+                    #[cfg(target_os = "macos")]
+                    super::macos::trace_io("poll", &peer);
                     tokio::select! {
                         res = peer.next() => {
+                            #[cfg(target_os = "macos")]
+                            super::macos::trace_io("peer", &peer);
                             if let Some(res) = res {
                                 match res {
                                     Err(err) => {
@@ -302,18 +308,30 @@ impl<T: InvokeUiSession> Remote<T> {
                                 break;
                             }
                         }
-                        d = self.receiver.recv() => {
+                        d = async {
+                            #[cfg(target_os = "macos")]
+                            if let Some(d) = pending_ui.take() { return Some(d); }
+                            self.receiver.recv().await
+                        } => {
+                            #[cfg(target_os = "macos")]
+                            super::macos::trace_io("ui", &peer);
                             if let Some(d) = d {
+                                #[cfg(target_os = "macos")]
+                                let d = super::macos::coalesce_hover(d, &mut self.receiver, &mut pending_ui);
                                 if !self.handle_msg_from_ui(d, &mut peer).await {
                                     break;
                                 }
                             }
                         }
                         _msg = rx_clip_client.recv() => {
+                            #[cfg(target_os = "macos")]
+                            super::macos::trace_io("clipboard", &peer);
                             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                             self.handle_local_clipboard_msg(&mut peer, _msg).await;
                         }
                         _ = self.timer.tick() => {
+                            #[cfg(target_os = "macos")]
+                            super::macos::trace_io("timer", &peer);
                             if last_recv_time.elapsed() >= SEC30 {
                                 self.handler.msgbox("error", "Connection Error", "Timeout", "");
                                 break;
@@ -329,6 +347,8 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
+                            #[cfg(target_os = "macos")]
+                            super::macos::trace_io("status", &peer);
                             if self.handler.is_restarting_remote_device()
                                 && last_recv_time.elapsed() >= RESTART_REMOTE_DEVICE_NO_DATA_TIMEOUT
                             {
@@ -404,6 +424,8 @@ impl<T: InvokeUiSession> Remote<T> {
                             });
                         }
                     }
+                    #[cfg(target_os = "macos")]
+                    super::macos::trace_io("handled", &peer);
                 }
                 log::debug!("Exit io_loop of id={}", self.handler.get_id());
                 // Stop client audio server.
@@ -801,7 +823,15 @@ impl<T: InvokeUiSession> Remote<T> {
                     },
                     _ => {}
                 }
+                #[cfg(target_os = "macos")]
+                if let Some(message::Union::MouseEvent(m)) = &msg.union {
+                    log::trace!("client_input stage=send mask={} x={} y={} pending={} monotonic={:?}", m.mask, m.x, m.y, self.receiver.len(), super::macos::trace_uptime());
+                }
                 allow_err!(peer.send(&msg).await);
+                #[cfg(target_os = "macos")]
+                if let Some(message::Union::MouseEvent(m)) = &msg.union {
+                    log::trace!("client_input stage=sent mask={} x={} y={} monotonic={:?}", m.mask, m.x, m.y, super::macos::trace_uptime());
+                }
             }
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 log::info!("send files, is remote {}", is_remote);
@@ -1544,6 +1574,8 @@ impl<T: InvokeUiSession> Remote<T> {
                     let Some(thread) = self.video_threads.get_mut(&display) else {
                         return true;
                     };
+                    #[cfg(target_os = "macos")]
+                    log::trace!("client_frame_received display={} timestamp={:?} queued={} key={} monotonic={:?}", vf.display, vf.h264s().frames.first().map(|f| f.pts), thread.video_queue.read().unwrap().len(), Self::contains_key_frame(&vf), super::macos::trace_uptime());
                     if Self::contains_key_frame(&vf) {
                         thread
                             .video_sender
@@ -1557,6 +1589,16 @@ impl<T: InvokeUiSession> Remote<T> {
                         } else {
                             thread.video_sender.send(MediaData::VideoQueue).ok();
                         }
+                    }
+                    #[cfg(target_os = "macos")]
+                    if self.handler.is_default()
+                        && self.handler.lc.read().unwrap().get_option(keys::OPTION_VIDEO_ACK_REQUIRED) == "Y"
+                    {
+                        let mut ack = Message::new();
+                        let mut misc = Misc::new();
+                        misc.set_video_received(true);
+                        ack.set_misc(misc);
+                        allow_err!(peer.send(&ack).await);
                     }
                 }
                 Some(message::Union::Hash(hash)) => {

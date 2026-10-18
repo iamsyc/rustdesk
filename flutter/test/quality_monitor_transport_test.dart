@@ -16,7 +16,35 @@ class _FakeFFI implements FFI {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _VisibleMonitor extends QualityMonitorModel {
+  _VisibleMonitor(FFI ffi) : super(WeakReference(ffi));
+  @override
+  bool get show => true;
+}
+
 void main() {
+  test('hidden monitor keeps current data without scheduling a UI frame', () {
+    final ffi = _FakeFFI();
+    final model = QualityMonitorModel(WeakReference(ffi));
+    var notifications = 0;
+    model.addListener(() => notifications++);
+    model.updateQualityStatus({'speed': '1 MB/s', 'codec_format': 'H264'});
+    model.updateQualityStatus({'speed': '2 MB/s', 'delay': '9'});
+    expect(model.data.speed, '2 MB/s');
+    expect(model.data.codecFormat, 'H264');
+    expect(model.data.delay, '9');
+    expect(notifications, 0);
+  });
+
+  test('visible monitor still notifies when quality data changes', () {
+    final model = _VisibleMonitor(_FakeFFI());
+    var notifications = 0;
+    model.addListener(() => notifications++);
+    model.updateQualityStatus({'speed': '1 MB/s', 'delay': '9'});
+    expect(model.data.speed, '1 MB/s');
+    expect(notifications, 1);
+  });
+
   test('the quality monitor names the WebRTC transport only on web', () {
     final ffi = _FakeFFI();
     ffi.ffiModel.cachedPeerData.streamType = 'WebRTC';

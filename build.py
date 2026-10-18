@@ -932,10 +932,19 @@ def build_deb_from_folder(version, binary_folder, want_drm=False):
 
 
 def build_flutter_dmg(version, features):
+    engine = os.environ.get('RUSTDESK_FLUTTER_ENGINE')
+    if not engine or not (Path(engine) / 'FlutterMacOS').is_file():
+        sys.exit('Set RUSTDESK_FLUTTER_ENGINE to the patched FlutterMacOS.framework; '
+                 'see docs/macos-native-texture.md')
+    engine = str(Path(engine).resolve())
+    ad_hoc = os.environ.get('RUSTDESK_ADHOC_SIGN') == '1'
+    if not os.environ.get('RUSTDESK_SIGNING_IDENTITY') and not ad_hoc:
+        sys.exit('Set RUSTDESK_SIGNING_IDENTITY; CI development builds may explicitly '
+                 'set RUSTDESK_ADHOC_SIGN=1')
     if not skip_cargo:
-        # set minimum osx build target, now is 10.14, which is the same as the flutter xcode project
+        # Match the macOS 15.8 deployment target in the Flutter Xcode project.
         system2(
-            f'MACOSX_DEPLOYMENT_TARGET=10.14 cargo build --locked --features {features} --release')
+            f'MACOSX_DEPLOYMENT_TARGET=15.8 cargo build --locked --features {features} --release')
     # copy dylib
     system2(
         "cp target/release/liblibrustdesk.dylib target/release/librustdesk.dylib")
@@ -947,6 +956,10 @@ def build_flutter_dmg(version, features):
     system2(
         f'FLUTTER_XCODE_ARCHS={mac_arch} FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES flutter build macos --release')
     system2('cp -rf ../target/release/service ./build/macos/Build/Products/Release/RustDesk.app/Contents/MacOS/')
+    subprocess.run([
+        sys.executable, os.path.join(REPO_ROOT, 'scripts/finalize-macos-client.py'),
+        'build/macos/Build/Products/Release/RustDesk.app', engine,
+    ] + (['--ad-hoc'] if ad_hoc else []), check=True)
     '''
     system2(
         "create-dmg --volname \"RustDesk Installer\" --window-pos 200 120 --window-size 800 400 --icon-size 100 --app-drop-link 600 185 --icon RustDesk.app 200 190 --hide-extension RustDesk.app rustdesk.dmg ./build/macos/Build/Products/Release/RustDesk.app")

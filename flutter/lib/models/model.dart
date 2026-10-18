@@ -3964,7 +3964,8 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
       }
-      notifyListeners();
+      // Keep the latest values without scheduling a frame for a hidden panel.
+      if (show) notifyListeners();
     } catch (e) {
       //
     }

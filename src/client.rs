@@ -102,6 +102,8 @@ mod audio_state_tests;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod screenshot;
 
 pub const MILLI1: Duration = Duration::from_millis(1);
@@ -2717,13 +2719,23 @@ impl VideoHandler {
         }
         match &vf.union {
             Some(frame) => {
-                let res = self.decoder.handle_video_frame(
+                #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+                { self.rgb.native = None; }
+                #[cfg(all(target_os = "macos", feature = "hwcodec", feature = "flutter"))]
+                let native = if use_texture_render() {
+                    self.decoder.handle_macos_native_frame(frame, &mut self.rgb)
+                } else { None };
+                #[cfg(not(all(target_os = "macos", feature = "hwcodec", feature = "flutter")))]
+                let native: Option<ResultType<bool>> = None;
+                let res = native.unwrap_or_else(|| self.decoder.handle_video_frame(
                     frame,
                     &mut self.rgb,
                     &mut self.texture,
                     pixelbuffer,
                     chroma,
-                );
+                ));
+                #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+                if self.rgb.native.is_some() { *chroma = Some(Chroma::I420); }
                 if res.as_ref().is_ok_and(|x| *x) {
                     self.fail_counter = 0;
                 } else {
@@ -3877,6 +3889,9 @@ impl LoginConfigHandler {
             my_platform,
             option: self.get_option_message(true).into(),
             session_id: self.session_id,
+            #[cfg(target_os = "macos")]
+            video_ack_required: self.conn_type == ConnType::DEFAULT_CONN
+                && self.get_option(keys::OPTION_VIDEO_ACK_REQUIRED) == "Y",
             version: crate::VERSION.to_string(),
             os_login,
             hwid,
@@ -4050,6 +4065,10 @@ pub fn start_video_thread<F, T>(
                             }
                         };
                         let display = vf.display as usize;
+                        #[cfg(target_os = "macos")]
+                        let source_timestamp = vf.h264s().frames.first().map(|f| f.pts);
+                        #[cfg(target_os = "macos")]
+                        log::trace!("client_frame_begin display={display} timestamp={source_timestamp:?} monotonic={:?}", macos::trace_uptime());
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
@@ -4068,11 +4087,37 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
-                                    video_callback(
-                                        display,
-                                        &mut handler.rgb,
-                                        handler.texture.texture,
-                                        pixelbuffer,
+                                    #[cfg(target_os = "macos")]
+                                    let decode_elapsed = start.elapsed();
+                                    // Decode reference frames in order, but avoid uploading stale
+                                    // macOS surfaces when more than one newer frame is waiting.
+                                    #[cfg(target_os = "macos")]
+                                    let queued = video_queue.read().unwrap().len();
+                                    #[cfg(target_os = "macos")]
+                                    let present = queued <= 1;
+                                    #[cfg(not(target_os = "macos"))]
+                                    let present = true;
+                                    if present {
+                                        video_callback(
+                                            display,
+                                            &mut handler.rgb,
+                                            handler.texture.texture,
+                                            pixelbuffer,
+                                        );
+                                    }
+                                    #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+                                    log::trace!(
+                                        "client_video_pipeline display={display} timestamp={source_timestamp:?} buffer={:p} decode_us={} upload_us={} queued={queued} presented={present} monotonic={:?}",
+                                        handler.rgb.native.as_ref().map_or(std::ptr::null_mut(), |f| f.as_ptr()),
+                                        decode_elapsed.as_micros(),
+                                        start.elapsed().saturating_sub(decode_elapsed).as_micros(),
+                                        macos::trace_uptime(),
+                                    );
+                                    #[cfg(all(target_os = "macos", not(feature = "hwcodec")))]
+                                    log::trace!(
+                                        "client_video_pipeline display={display} decode_us={} upload_us={} queued={queued} presented={present}",
+                                        decode_elapsed.as_micros(),
+                                        start.elapsed().saturating_sub(decode_elapsed).as_micros(),
                                     );
 
                                     // chroma
@@ -4360,6 +4405,8 @@ pub fn send_mouse(
         mouse_event.y *= factor;
     }
     interface.swap_modifier_mouse(&mut mouse_event);
+    #[cfg(target_os = "macos")]
+    log::trace!("client_input stage=enqueue mask={} x={} y={} monotonic={:?}", mouse_event.mask, mouse_event.x, mouse_event.y, macos::trace_uptime());
     msg_out.set_mouse_event(mouse_event);
     interface.send(Data::Message(msg_out));
 }
