@@ -7,10 +7,8 @@ use crate::ui::CUR_SESSION;
 use crate::ui_session_interface::{InvokeUiSession, Session};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::{client::get_key_state, common::GrabState};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-use hbb_common::log;
 use base::message_proto::*;
-use hbb_common::SessionID;
+use hbb_common::{log, SessionID};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use rdev::KeyCode;
 use rdev::{Event, EventType, Key};
