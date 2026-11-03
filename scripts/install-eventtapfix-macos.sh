@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 /path/to/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg" >&2
+  echo "Usage: $0 /path/to/RustDesk-EventTapFocusFix-1.5.1-x86_64.dmg" >&2
   exit 64
 fi
 
@@ -54,7 +54,7 @@ ARCHS="$(lipo -archs "${SOURCE_BIN}")"
 grep -aFq "macOS keyboard event tap was disabled" "${SOURCE_BIN}"
 grep -aFq "native Event Tap remains armed" "${SOURCE_BIN}"
 grep -aFq "ignoring unsupported macOS input source" "${SOURCE_BIN}"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_APP}/Contents/Info.plist")" == "1.5.0" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_APP}/Contents/Info.plist")" == "1.5.1" ]]
 codesign --verify --deep --strict --verbose=2 "${SOURCE_APP}"
 
 echo "Verified patched x86_64 RustDesk application."

@@ -90,6 +90,12 @@ bool set_lantency_free(void *priv_data, const std::string &name) {
     }
   }
   if (name.find("videotoolbox") != std::string::npos) {
+    // Avoid oversized H.264 reference pools rejected by Intel VideoToolbox.
+    if (name.find("h264") != std::string::npos &&
+        (ret = av_opt_set_int(priv_data, "max_ref_frames", 1, 0)) < 0) {
+      LOG_ERROR(std::string("videotoolbox set max_ref_frames failed, ret = ") + av_err2str(ret));
+      return false;
+    }
     if ((ret = av_opt_set_int(priv_data, "realtime", 1, 0)) < 0) {
       LOG_ERROR(std::string("videotoolbox set realtime failed, ret = ") + av_err2str(ret));
       return false;

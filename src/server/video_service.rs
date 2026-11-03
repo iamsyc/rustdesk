@@ -64,6 +64,8 @@ use std::{
 
 pub const OPTION_REFRESH: &'static str = "refresh";
 
+mod static_refresh;
+
 #[cfg(windows)]
 const DXGI_RECOVERY_LIMIT: usize = 3;
 #[cfg(windows)]
@@ -728,8 +730,20 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut encode_fail_counter = 0;
     let mut first_frame = true;
     let encoder_started = Instant::now();
+    // Set once the encoder emits its first packet; until then it may legitimately return nothing.
+    let mut encoder_warmed_up = false;
     let capture_width = c.width;
     let capture_height = c.height;
+    let mut static_refresh = static_refresh::StaticRefresh::new(
+        vs.source,
+        codec_format,
+        &encoder_cfg,
+        &sp,
+        &recorder,
+        display_idx,
+        capture_width,
+        capture_height,
+    );
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
 
     while sp.ok() {
@@ -744,11 +758,14 @@ fn run(vs: VideoService) -> ResultType<()> {
             &mut second_instant,
             &sp.name(),
         )?;
-        let warming_up = cfg!(target_os = "macos")
-            && first_frame
-            && !encoder.latency_free()
-            && encoder_started.elapsed() < Duration::from_secs(1);
-        if sp.is_option_true(OPTION_REFRESH) && !warming_up {
+        if sp.is_option_true(OPTION_REFRESH)
+            && refresh_allowed(
+                first_frame,
+                encoder_warmed_up,
+                encoder.latency_free(),
+                encoder_started.elapsed() >= Duration::from_secs(1),
+            )
+        {
             if vs.source.is_monitor() {
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
             }
@@ -853,7 +870,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
 
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
-                    let send_conn_ids = handle_one_frame(
+                    static_refresh.on_frame(&frame);
+                    let result = handle_one_frame(
                         display_idx,
                         &sp,
                         frame,
@@ -862,10 +880,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                         recorder.clone(),
                         &mut encode_fail_counter,
                         &mut first_frame,
+                        &mut encoder_warmed_up,
                         capture_width,
                         capture_height,
                     )?;
-                    frame_controller.set_send(now, send_conn_ids);
+                    static_refresh.on_frame_encoded(&result);
+                    frame_controller.set_send(now, result.send_conn_ids);
                     send_counter += 1;
                 }
                 #[cfg(windows)]
@@ -926,13 +946,25 @@ fn run(vs: VideoService) -> ResultType<()> {
                             recorder.clone(),
                             &mut encode_fail_counter,
                             &mut first_frame,
+                            &mut encoder_warmed_up,
                             capture_width,
                             capture_height,
-                        )?;
+                        )?
+                        .send_conn_ids;
+                        static_refresh.on_encoded(!send_conn_ids.is_empty());
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
                     }
                 }
+                static_refresh.try_encode(
+                    &yuv,
+                    spf,
+                    quality,
+                    now,
+                    ms,
+                    &mut encoder,
+                    &mut frame_controller,
+                )?;
             }
             Err(err) => {
                 #[cfg(windows)]
@@ -1239,6 +1271,12 @@ fn check_privacy_mode_changed(
 }
 
 #[inline]
+fn refresh_allowed(unfed: bool, warmed_up: bool, latency_free: bool, warmup_expired: bool) -> bool {
+    // Only VideoToolbox has been seen to need this; other platforms keep refreshing as before.
+    !cfg!(target_os = "macos") || unfed || warmed_up || latency_free || warmup_expired
+}
+
+#[inline]
 fn handle_one_frame(
     display: usize,
     sp: &GenericService,
@@ -1248,9 +1286,10 @@ fn handle_one_frame(
     recorder: Arc<Mutex<Option<Recorder>>>,
     encode_fail_counter: &mut usize,
     first_frame: &mut bool,
+    encoder_warmed_up: &mut bool,
     width: usize,
     height: usize,
-) -> ResultType<HashSet<i32>> {
+) -> ResultType<static_refresh::FrameEncodeResult> {
     sp.snapshot(|sps| {
         // so that new sub and old sub share the same encoder after switch
         if sps.has_subscribes() {
@@ -1261,11 +1300,13 @@ fn handle_one_frame(
     })?;
 
     let mut send_conn_ids: HashSet<i32> = Default::default();
+    let mut vpx_no_output = false;
     let first = *first_frame;
     *first_frame = false;
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
             *encode_fail_counter = 0;
+            *encoder_warmed_up = true;
             vf.display = display as _;
             let mut msg = Message::new();
             msg.set_video_frame(vf);
@@ -1276,10 +1317,9 @@ fn handle_one_frame(
                 .map(|r| r.write_message(&msg, width, height));
             send_conn_ids = sp.send_video_frame(msg);
         }
-        Err(e) if e.is::<scrap::codec::EncodePending>() => {
-            *first_frame = first;
-        }
+        Err(e) if e.is::<scrap::codec::EncodePending>() => {}
         Err(e) => {
+            vpx_no_output = e.is::<scrap::VpxNoOutput>();
             *encode_fail_counter += 1;
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
@@ -1310,7 +1350,10 @@ fn handle_one_frame(
             }
         }
     }
-    Ok(send_conn_ids)
+    Ok(static_refresh::FrameEncodeResult {
+        send_conn_ids,
+        vpx_no_output,
+    })
 }
 
 #[inline]
@@ -1531,5 +1574,24 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refresh_allowed;
+
+    #[test]
+    fn refresh_waits_for_hw_encoder_warmup() {
+        // Deferred on macOS only; everywhere else a refresh is always allowed.
+        assert_eq!(
+            refresh_allowed(false, false, false, false),
+            !cfg!(target_os = "macos")
+        );
+        assert!(refresh_allowed(false, true, false, false));
+        assert!(refresh_allowed(false, false, true, false));
+        assert!(refresh_allowed(false, false, false, true));
+        // Nothing fed yet: no warm-up to lose, and a refresh can restart a stalled capturer.
+        assert!(refresh_allowed(true, false, false, false));
     }
 }
