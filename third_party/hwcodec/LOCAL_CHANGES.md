@@ -8,6 +8,9 @@ are retained, including its resolution-change buffer fix.
 
 Changes:
 
+* Register `externals` in the root submodule configuration at upstream's
+  `8903740a1f47884906a6e347ad3d8d56304d9771` revision so recursive checkouts
+  include the AMD, NVIDIA, and Intel SDK sources required by Windows builds.
 * Restore the native H.264 hardware capability probe and register H.264
   VideoToolbox when it reports hardware support.
 * Allow the macOS capability probe up to one second of input before requiring
