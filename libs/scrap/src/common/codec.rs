@@ -59,6 +59,17 @@ impl std::fmt::Display for EncodePending {
 
 impl std::error::Error for EncodePending {}
 
+#[cfg(all(target_os = "macos", feature = "hwcodec"))]
+#[derive(Debug)]
+pub struct VideoToolboxInitFailed;
+
+#[cfg(all(target_os = "macos", feature = "hwcodec"))]
+impl std::fmt::Display for VideoToolboxInitFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VideoToolbox encoder unavailable")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
     VPX(VpxEncoderConfig),
@@ -154,17 +165,27 @@ impl Encoder {
             }),
 
             #[cfg(feature = "hwcodec")]
-            EncoderCfg::HWRAM(_) => match HwRamEncoder::new(config, i444) {
-                Ok(hw) => Ok(Encoder {
-                    codec: Box::new(hw),
-                }),
-                Err(e) => {
-                    log::error!("new hw encoder failed: {e:?}, clear config");
-                    HwCodecConfig::clear(false, true);
-                    *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
-                    Err(e)
+            EncoderCfg::HWRAM(ref hw_config) => {
+                #[cfg(target_os = "macos")]
+                let encoder_name = hw_config.name.clone();
+                #[cfg(not(target_os = "macos"))]
+                let _ = hw_config;
+                match HwRamEncoder::new(config, i444) {
+                    Ok(hw) => Ok(Encoder {
+                        codec: Box::new(hw),
+                    }),
+                    Err(e) => {
+                        log::error!("new hw encoder failed: {e:?}");
+                        #[cfg(target_os = "macos")]
+                        if HwRamEncoder::defer_videotoolbox_encoder(&encoder_name) {
+                            return Err(e.context(VideoToolboxInitFailed));
+                        }
+                        HwCodecConfig::clear(false, true);
+                        *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
+                        Err(e)
+                    }
                 }
-            },
+            }
             #[cfg(feature = "vram")]
             EncoderCfg::VRAM(_) => match VRamEncoder::new(config, i444) {
                 Ok(tex) => Ok(Encoder {
@@ -189,6 +210,10 @@ impl Encoder {
             }
             EncodingUpdate::Remove(id) => {
                 decodings.remove(&id);
+                #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+                if decodings.is_empty() {
+                    HwRamEncoder::reset_videotoolbox_retries();
+                }
             }
             EncodingUpdate::NewOnlyVP9(id) => {
                 decodings.insert(

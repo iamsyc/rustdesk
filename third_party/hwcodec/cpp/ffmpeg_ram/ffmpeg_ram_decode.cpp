@@ -208,6 +208,11 @@ private:
         } else
 #endif
         {
+          if ((sw_frame_->width != 0 || sw_frame_->height != 0) &&
+              (sw_frame_->width != frame_->width ||
+               sw_frame_->height != frame_->height)) {
+            av_frame_unref(sw_frame_);
+          }
           if ((ret = av_hwframe_transfer_data(sw_frame_, frame_, 0)) < 0) {
             LOG_ERROR(std::string("av_hwframe_transfer_data failed, ret = ") + av_err2str(ret));
             goto _exit;
@@ -295,6 +300,8 @@ extern "C" void ffmpeg_ram_free_decoder(FFmpegRamDecoder *decoder) {
     decoder = NULL;
   } catch (const std::exception &e) {
     LOG_ERROR(std::string("ffmpeg_ram_free_decoder exception:") + e.what());
+  } catch (...) {
+    LOG_ERROR("ffmpeg_ram_free_decoder: unknown exception");
   }
 }
 
@@ -311,6 +318,8 @@ ffmpeg_ram_new_decoder(const char *name, int device_type, int thread_count,
     }
   } catch (std::exception &e) {
     LOG_ERROR(std::string("new decoder exception:") + e.what());
+  } catch (...) {
+    LOG_ERROR("ffmpeg_ram_new_decoder: unknown exception");
   }
   if (decoder) {
     decoder->free_decoder();
@@ -331,6 +340,8 @@ extern "C" int ffmpeg_ram_decode(FFmpegRamDecoder *decoder, const uint8_t *data,
     }
   } catch (const std::exception &e) {
     LOG_ERROR(std::string("ffmpeg_ram_decode exception:") + e.what());
+  } catch (...) {
+    LOG_ERROR("ffmpeg_ram_decode: unknown exception");
   }
   return HWCODEC_ERR_COMMON;
 }

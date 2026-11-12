@@ -32,26 +32,21 @@ RustDesk already uses this recovery pattern for its privacy-mode Event Tap in
 
 ## Build
 
-Run the **Build macOS Event Tap and focus fix** workflow from GitHub Actions. It builds an
-Intel `x86_64` application with the same Rust, Flutter and vcpkg versions pinned
-by RustDesk 1.5.0, applies an ad-hoc signature, creates a DMG and uploads:
-
-* `RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg`
-* `SHA256SUMS.txt`
-
-The build is intentionally not notarized. It is intended only for installation
-on the owner's Mac.
+The **Build macOS H264 pending-output fix** workflow builds the maintained 1.5.3
+client for Intel and Apple Silicon with the patched Flutter engine. It produces
+an ad-hoc signed DMG, a checksum file, and a hardware test executable for each
+architecture. The Intel DMG is named `RustDesk-H264PendingFix-1.5.3-x86_64.dmg`.
 
 ## Install and roll back
 
 Run:
 
 ```bash
-./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg
+./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-H264PendingFix-1.5.3-x86_64.dmg
 ```
 
-The script verifies the checksum, architecture, embedded recovery log marker
-and code signature. It then moves the existing `/Applications/RustDesk.app` to
+The script verifies the checksum, Intel architecture, app version, embedded
+recovery log markers and code signature. It then moves the existing `/Applications/RustDesk.app` to
 a timestamped backup before installing the patched application. It preserves existing
 settings and privacy permissions. Check macOS permissions after launch; an
 ad-hoc signed replacement may require a new grant.
