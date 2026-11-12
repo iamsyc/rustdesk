@@ -15,6 +15,8 @@ GPU release callback. It also uses the actual 4:2:0 plane dimensions and propaga
 the source ICC profile and chroma siting. The Skia patch supports cosited sampling.
 The Dart patch reads the actual macOS product version: its old Darwin-major
 calculation reported every macOS 15 minor release as 15.0 and rejected a 15.8 build.
+The text input patch backports Flutter engine PR 54469 so AppKit can query
+empty text or a range beyond the end without crashing.
 
 Build the engine with an installed macOS SDK supported by the pinned compiler:
 
@@ -23,8 +25,8 @@ scripts/build-macos-native-texture-engine.sh ENGINE_WORKSPACE MACOS_SDK all x86_
 ```
 
 The script pins the engine, depot tools and engine dependencies. It applies the
-three patches in `.github/patches`, targets the selected architecture and macOS 15.8, builds the
-framework, runs the texture regression tests and verifies both NV12 planes remain
+patches in `.github/patches`, targets the selected architecture and macOS 15.8, builds the
+framework, runs the texture and text input regression tests and verifies both NV12 planes remain
 readable by Metal after the provider is released. Pass `arm64` for Apple Silicon;
 the default is the host architecture. The framework is under `src/out/host_release`
 for Intel or `src/out/host_release_arm64` for Apple Silicon. Use the macOS 15.4 SDK

@@ -76,6 +76,15 @@ elif ! git -C "$engine_source" apply --reverse --check "$patch_file"; then
   exit 1
 fi
 
+# Flutter engine PR 54469 fixes AppKit text input requests past the text bounds.
+text_input_patch="$repo_dir/.github/patches/flutter-engine-3.24.5-text-input-range.diff"
+if git -C "$engine_source" apply --check "$text_input_patch"; then
+  git -C "$engine_source" apply "$text_input_patch"
+elif ! git -C "$engine_source" apply --reverse --check "$text_input_patch"; then
+  echo "Text input patch does not match the pinned engine" >&2
+  exit 1
+fi
+
 skia_source="$engine_source/third_party/skia"
 skia_patch="$repo_dir/.github/patches/flutter-skia-3.24.5-native-nv12.diff"
 if git -C "$skia_source" apply --check "$skia_patch"; then
@@ -112,7 +121,7 @@ cd "$engine_workspace/src"
   --gtest_output="xml:$engine_workspace/texture-pacing-tests.xml"
 
 "$output/flutter_desktop_darwin_unittests" \
-  --gtest_filter='FlutterEmbedderExternalTextureTest.RejectingFrameReleasesResources:FlutterEmbedderExternalTextureTest.FrameResourcesSurvivePendingGPUDraw:FlutterEmbedderExternalTextureTest.NativeNv12PreservesSourceTransferFunction:FlutterEmbedderExternalTextureTest.NativeNv12PreservesLeftChromaSiting:FlutterEmbedderExternalTextureTest.NativeGammaPaletteIsContinuous' \
+  --gtest_filter='FlutterEmbedderExternalTextureTest.RejectingFrameReleasesResources:FlutterEmbedderExternalTextureTest.FrameResourcesSurvivePendingGPUDraw:FlutterEmbedderExternalTextureTest.NativeNv12PreservesSourceTransferFunction:FlutterEmbedderExternalTextureTest.NativeNv12PreservesLeftChromaSiting:FlutterEmbedderExternalTextureTest.NativeGammaPaletteIsContinuous:FlutterTextInputPluginTest.TestAttributedSubstringOutOfRange' \
   --gtest_output="xml:$engine_workspace/texture-tests.xml"
 
 probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/rustdesk-nv12-probe.XXXXXX")"
