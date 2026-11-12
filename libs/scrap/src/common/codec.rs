@@ -199,6 +199,10 @@ impl Encoder {
             }
             EncodingUpdate::Remove(id) => {
                 decodings.remove(&id);
+                #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+                if decodings.is_empty() {
+                    HwRamEncoder::reset_videotoolbox_retries();
+                }
             }
             EncodingUpdate::NewOnlyVP9(id) => {
                 decodings.insert(

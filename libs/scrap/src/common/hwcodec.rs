@@ -37,8 +37,18 @@ use std::{
 #[cfg(target_os = "macos")]
 const VIDEOTOOLBOX_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
-static VIDEOTOOLBOX_RETRY_AFTER: [Mutex<Option<Instant>>; 2] =
-    [Mutex::new(None), Mutex::new(None)];
+enum VideoToolboxRetry {
+    Available,
+    Cooldown(Instant),
+    Retrying(Instant),
+    UntilIdle,
+}
+
+#[cfg(target_os = "macos")]
+static VIDEOTOOLBOX_RETRY: [Mutex<VideoToolboxRetry>; 2] = [
+    Mutex::new(VideoToolboxRetry::Available),
+    Mutex::new(VideoToolboxRetry::Available),
+];
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
@@ -255,32 +265,45 @@ impl HwRamEncoder {
     }
 
     #[cfg(target_os = "macos")]
-    fn retry_after(format: CodecFormat) -> Option<&'static Mutex<Option<Instant>>> {
+    fn retry_state(format: CodecFormat) -> Option<&'static Mutex<VideoToolboxRetry>> {
         match format {
-            CodecFormat::H264 => Some(&VIDEOTOOLBOX_RETRY_AFTER[0]),
-            CodecFormat::H265 => Some(&VIDEOTOOLBOX_RETRY_AFTER[1]),
+            CodecFormat::H264 => Some(&VIDEOTOOLBOX_RETRY[0]),
+            CodecFormat::H265 => Some(&VIDEOTOOLBOX_RETRY[1]),
             _ => None,
         }
     }
 
     #[cfg(target_os = "macos")]
     pub(crate) fn defer_videotoolbox_encoder(name: &str) -> bool {
-        let Some(deadline) = Self::videotoolbox_format(name).and_then(Self::retry_after) else {
+        let Some(state) = Self::videotoolbox_format(name).and_then(Self::retry_state) else {
             return false;
         };
-        *deadline.lock().unwrap() = Some(Instant::now() + VIDEOTOOLBOX_RETRY_INTERVAL);
+        {
+            let mut state = state.lock().unwrap();
+            match *state {
+                VideoToolboxRetry::Retrying(started)
+                    if started.elapsed() < VIDEOTOOLBOX_RETRY_INTERVAL =>
+                {
+                    // Keep the fallback running when the first automatic retry also fails.
+                    *state = VideoToolboxRetry::UntilIdle;
+                }
+                VideoToolboxRetry::Available | VideoToolboxRetry::Retrying(_) => {
+                    *state = VideoToolboxRetry::Cooldown(Instant::now() + VIDEOTOOLBOX_RETRY_INTERVAL);
+                }
+                VideoToolboxRetry::Cooldown(_) | VideoToolboxRetry::UntilIdle => {}
+            }
+        }
         crate::codec::Encoder::update(crate::codec::EncodingUpdate::Check);
         true
     }
 
     #[cfg(target_os = "macos")]
-    pub fn refresh_videotoolbox_encoders() {
-        let now = Instant::now();
+    pub fn refresh_videotoolbox_encoders(now: Instant) {
         let mut expired = false;
-        for retry_after in &VIDEOTOOLBOX_RETRY_AFTER {
-            let mut retry_after = retry_after.lock().unwrap();
-            if retry_after.is_some_and(|deadline| now >= deadline) {
-                *retry_after = None;
+        for state in &VIDEOTOOLBOX_RETRY {
+            let mut state = state.lock().unwrap();
+            if matches!(*state, VideoToolboxRetry::Cooldown(deadline) if now >= deadline) {
+                *state = VideoToolboxRetry::Retrying(now);
                 expired = true;
             }
         }
@@ -289,13 +312,20 @@ impl HwRamEncoder {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn reset_videotoolbox_retries() {
+        for state in &VIDEOTOOLBOX_RETRY {
+            *state.lock().unwrap() = VideoToolboxRetry::Available;
+        }
+    }
+
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         #[cfg(target_os = "macos")]
-        if Self::retry_after(format).is_some_and(|retry_after| {
-            retry_after
-                .lock()
-                .unwrap()
-                .is_some_and(|deadline| Instant::now() < deadline)
+        if Self::retry_state(format).is_some_and(|state| {
+            matches!(
+                *state.lock().unwrap(),
+                VideoToolboxRetry::Cooldown(_) | VideoToolboxRetry::UntilIdle
+            )
         }) {
             return None;
         }
@@ -881,7 +911,6 @@ pub fn start_check_process() {
     });
 }
 
-
 #[cfg(all(test, target_os = "macos"))]
 mod videotoolbox_tests {
     use super::*;
@@ -914,13 +943,32 @@ mod videotoolbox_tests {
             .flat_map(|i| encoder.encode(&input, i * 33).unwrap())
             .any(|packet| packet.key == 1));
 
+        let conn = 1;
+        let decoding = base::message_proto::SupportedDecoding {
+            ability_h264: 1,
+            ability_h265: 1,
+            prefer: base::message_proto::supported_decoding::PreferCodec::H264.into(),
+            ..Default::default()
+        };
+        use crate::codec::{Encoder as NegotiatedEncoder, EncodingUpdate};
+        NegotiatedEncoder::update(EncodingUpdate::Update(conn, decoding));
         encoder.disable();
         assert!(HwRamEncoder::try_get(CodecFormat::H264).is_none());
+        assert_eq!(NegotiatedEncoder::negotiated_codec(), CodecFormat::H265);
+
+        let retry_at = Instant::now() + VIDEOTOOLBOX_RETRY_INTERVAL;
+        HwRamEncoder::refresh_videotoolbox_encoders(retry_at);
+        assert_eq!(NegotiatedEncoder::negotiated_codec(), CodecFormat::H264);
+
+        let mut invalid = encoder.config.clone();
+        invalid.width -= 1;
+        assert!(NegotiatedEncoder::new(EncoderCfg::HWRAM(invalid), false).is_err());
+        HwRamEncoder::refresh_videotoolbox_encoders(retry_at + VIDEOTOOLBOX_RETRY_INTERVAL);
+        assert!(HwRamEncoder::try_get(CodecFormat::H264).is_none());
         assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());
-        *HwRamEncoder::retry_after(CodecFormat::H264).unwrap().lock().unwrap() =
-            Some(Instant::now());
-        HwRamEncoder::refresh_videotoolbox_encoders();
+        assert_eq!(NegotiatedEncoder::negotiated_codec(), CodecFormat::H265);
+
+        NegotiatedEncoder::update(EncodingUpdate::Remove(conn));
         assert!(HwRamEncoder::try_get(CodecFormat::H264).is_some());
-        assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());
     }
 }

@@ -658,6 +658,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     );
     let client_record = video_qos.record();
     drop(video_qos);
+    #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+    let requested_codec = Encoder::negotiated_codec();
     let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
         &c,
         sp.name(),
@@ -670,14 +672,23 @@ fn run(vs: VideoService) -> ResultType<()> {
     ) {
         Ok(result) => result,
         Err(err) => {
-            log::error!("Failed to create encoder: {err:?}, fallback to VP9");
-            Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
-                width: c.width as _,
-                height: c.height as _,
-                quality,
-                codec: VpxVideoCodecId::VP9,
-                keyframe_interval: None,
-            }));
+            #[cfg(all(target_os = "macos", feature = "hwcodec"))]
+            let negotiated_fallback = matches!(requested_codec, CodecFormat::H264 | CodecFormat::H265)
+                && Encoder::negotiated_codec() != requested_codec;
+            #[cfg(not(all(target_os = "macos", feature = "hwcodec")))]
+            let negotiated_fallback = false;
+            if negotiated_fallback {
+                log::warn!("Failed to create encoder: {err:?}, using renegotiated codec");
+            } else {
+                log::error!("Failed to create encoder: {err:?}, fallback to VP9");
+                Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
+                    width: c.width as _,
+                    height: c.height as _,
+                    quality,
+                    codec: VpxVideoCodecId::VP9,
+                    keyframe_interval: None,
+                }));
+            }
             setup_encoder(
                 &c,
                 sp.name(),
