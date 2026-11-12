@@ -59,6 +59,17 @@ impl std::fmt::Display for EncodePending {
 
 impl std::error::Error for EncodePending {}
 
+#[cfg(all(target_os = "macos", feature = "hwcodec"))]
+#[derive(Debug)]
+pub struct VideoToolboxInitFailed;
+
+#[cfg(all(target_os = "macos", feature = "hwcodec"))]
+impl std::fmt::Display for VideoToolboxInitFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VideoToolbox encoder unavailable")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
     VPX(VpxEncoderConfig),
@@ -167,7 +178,7 @@ impl Encoder {
                         log::error!("new hw encoder failed: {e:?}");
                         #[cfg(target_os = "macos")]
                         if HwRamEncoder::defer_videotoolbox_encoder(&encoder_name) {
-                            return Err(e);
+                            return Err(e.context(VideoToolboxInitFailed));
                         }
                         HwCodecConfig::clear(false, true);
                         *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;

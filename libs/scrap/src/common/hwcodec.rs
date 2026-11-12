@@ -962,7 +962,10 @@ mod videotoolbox_tests {
 
         let mut invalid = encoder.config.clone();
         invalid.width -= 1;
-        assert!(NegotiatedEncoder::new(EncoderCfg::HWRAM(invalid), false).is_err());
+        let Err(error) = NegotiatedEncoder::new(EncoderCfg::HWRAM(invalid), false) else {
+            panic!("an odd-width VideoToolbox encoder must fail to initialize");
+        };
+        assert!(error.is::<crate::codec::VideoToolboxInitFailed>());
         HwRamEncoder::refresh_videotoolbox_encoders(retry_at + VIDEOTOOLBOX_RETRY_INTERVAL);
         assert!(HwRamEncoder::try_get(CodecFormat::H264).is_none());
         assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());

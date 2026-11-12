@@ -658,8 +658,6 @@ fn run(vs: VideoService) -> ResultType<()> {
     );
     let client_record = video_qos.record();
     drop(video_qos);
-    #[cfg(all(target_os = "macos", feature = "hwcodec"))]
-    let requested_codec = Encoder::negotiated_codec();
     let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
         &c,
         sp.name(),
@@ -673,8 +671,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         Ok(result) => result,
         Err(err) => {
             #[cfg(all(target_os = "macos", feature = "hwcodec"))]
-            let negotiated_fallback = matches!(requested_codec, CodecFormat::H264 | CodecFormat::H265)
-                && Encoder::negotiated_codec() != requested_codec;
+            let negotiated_fallback = err.is::<scrap::codec::VideoToolboxInitFailed>();
             #[cfg(not(all(target_os = "macos", feature = "hwcodec")))]
             let negotiated_fallback = false;
             if negotiated_fallback {
