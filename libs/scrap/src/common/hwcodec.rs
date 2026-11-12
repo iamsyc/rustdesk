@@ -28,6 +28,18 @@ use hwcodec::{
 #[cfg(all(test, windows, feature = "vram"))]
 mod tests;
 
+#[cfg(target_os = "macos")]
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
+#[cfg(target_os = "macos")]
+const VIDEOTOOLBOX_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+static VIDEOTOOLBOX_RETRY_AFTER: [Mutex<Option<Instant>>; 2] =
+    [Mutex::new(None), Mutex::new(None)];
+
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 pub const DEFAULT_FPS: i32 = 30;
 const DEFAULT_GOP: i32 = i32::MAX;
@@ -55,6 +67,8 @@ pub struct HwRamEncoderConfig {
 pub struct HwRamEncoder {
     encoder: Encoder,
     pending_output: bool,
+    #[cfg(target_os = "macos")]
+    last_videotoolbox_recovery: Option<Instant>,
     pub format: DataFormat,
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
@@ -101,6 +115,8 @@ impl EncoderApi for HwRamEncoder {
                     Ok(encoder) => Ok(HwRamEncoder {
                         encoder,
                         pending_output: true,
+                        #[cfg(target_os = "macos")]
+                        last_videotoolbox_recovery: None,
                         format,
                         pixfmt: ctx.pixfmt,
                         bitrate,
@@ -220,12 +236,69 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn disable(&self) {
+        #[cfg(target_os = "macos")]
+        if Self::defer_videotoolbox_encoder(&self.config.name) {
+            return;
+        }
         HwCodecConfig::clear(false, true);
     }
 }
 
 impl HwRamEncoder {
+    #[cfg(target_os = "macos")]
+    fn videotoolbox_format(name: &str) -> Option<CodecFormat> {
+        match name {
+            "h264_videotoolbox" => Some(CodecFormat::H264),
+            "hevc_videotoolbox" => Some(CodecFormat::H265),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn retry_after(format: CodecFormat) -> Option<&'static Mutex<Option<Instant>>> {
+        match format {
+            CodecFormat::H264 => Some(&VIDEOTOOLBOX_RETRY_AFTER[0]),
+            CodecFormat::H265 => Some(&VIDEOTOOLBOX_RETRY_AFTER[1]),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn defer_videotoolbox_encoder(name: &str) -> bool {
+        let Some(deadline) = Self::videotoolbox_format(name).and_then(Self::retry_after) else {
+            return false;
+        };
+        *deadline.lock().unwrap() = Some(Instant::now() + VIDEOTOOLBOX_RETRY_INTERVAL);
+        crate::codec::Encoder::update(crate::codec::EncodingUpdate::Check);
+        true
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn refresh_videotoolbox_encoders() {
+        let now = Instant::now();
+        let mut expired = false;
+        for retry_after in &VIDEOTOOLBOX_RETRY_AFTER {
+            let mut retry_after = retry_after.lock().unwrap();
+            if retry_after.is_some_and(|deadline| now >= deadline) {
+                *retry_after = None;
+                expired = true;
+            }
+        }
+        if expired {
+            crate::codec::Encoder::update(crate::codec::EncodingUpdate::Check);
+        }
+    }
+
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
+        #[cfg(target_os = "macos")]
+        if Self::retry_after(format).is_some_and(|retry_after| {
+            retry_after
+                .lock()
+                .unwrap()
+                .is_some_and(|deadline| Instant::now() < deadline)
+        }) {
+            return None;
+        }
         let mut info = None;
         let best = CodecInfo::prioritized(HwCodecConfig::get().ram_encode);
         match format {
@@ -245,14 +318,40 @@ impl HwRamEncoder {
     }
 
     pub fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<EncodeFrame>> {
-        match self.encoder.encode(yuv, ms) {
-            Ok(v) => {
-                let mut data = Vec::<EncodeFrame>::new();
-                data.append(v);
-                Ok(data)
+        let take_frames = |frames: &mut Vec<EncodeFrame>| {
+            let mut data = Vec::new();
+            data.append(frames);
+            data
+        };
+        let error = match self.encoder.encode(yuv, ms) {
+            Ok(frames) => return Ok(take_frames(frames)),
+            Err(error) => error,
+        };
+        #[cfg(target_os = "macos")]
+        if Self::videotoolbox_format(&self.config.name).is_some()
+            && !self
+                .last_videotoolbox_recovery
+                .is_some_and(|last| last.elapsed() < VIDEOTOOLBOX_RETRY_INTERVAL)
+        {
+            self.last_videotoolbox_recovery = Some(Instant::now());
+            let mut ctx = self.encoder.ctx.clone();
+            ctx.kbs = self.bitrate as _;
+            match Encoder::new(ctx) {
+                Ok(encoder) => {
+                    self.encoder = encoder;
+                    log::info!("Recreated {} after encode error {error}", self.config.name);
+                    return self
+                        .encoder
+                        .encode(yuv, ms)
+                        .map(take_frames)
+                        .map_err(|code| anyhow!("hardware encoder returned error {code}"));
+                }
+                Err(()) => {
+                    log::warn!("Could not recreate {} after encode error {error}", self.config.name)
+                }
             }
-            Err(code) => Err(anyhow!("hardware encoder returned error {code}")),
         }
+        Err(anyhow!("hardware encoder returned error {error}"))
     }
 
     fn rate_control(_config: &HwRamEncoderConfig) -> RateControl {
@@ -780,4 +879,48 @@ pub fn start_check_process() {
     ONCE.call_once(|| {
         std::thread::spawn(f);
     });
+}
+
+
+#[cfg(all(test, target_os = "macos"))]
+mod videotoolbox_tests {
+    use super::*;
+
+    #[test]
+    fn h264_recovers_and_preserves_hevc_availability() {
+        let config = serde_json::from_str(&check_available_hwcodec()).unwrap();
+        *CONFIG.lock().unwrap() = Some(config);
+        assert!(HwRamEncoder::try_get(CodecFormat::H264).is_some());
+        assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());
+
+        let mut encoder = HwRamEncoder::new(
+            EncoderCfg::HWRAM(HwRamEncoderConfig {
+                name: "h264_videotoolbox".into(),
+                mc_name: None,
+                width: 1280,
+                height: 720,
+                quality: 0.68,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let input = vec![128; encoder.encoder.length as usize];
+        assert!((0..16)
+            .flat_map(|i| encoder.encode(&input, i * 33).unwrap())
+            .any(|packet| packet.key == 1));
+        assert!(encoder.encode(&[], 16 * 33).is_err());
+        assert!((17..33)
+            .flat_map(|i| encoder.encode(&input, i * 33).unwrap())
+            .any(|packet| packet.key == 1));
+
+        encoder.disable();
+        assert!(HwRamEncoder::try_get(CodecFormat::H264).is_none());
+        assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());
+        *HwRamEncoder::retry_after(CodecFormat::H264).unwrap().lock().unwrap() =
+            Some(Instant::now());
+        HwRamEncoder::refresh_videotoolbox_encoders();
+        assert!(HwRamEncoder::try_get(CodecFormat::H264).is_some());
+        assert!(HwRamEncoder::try_get(CodecFormat::H265).is_some());
+    }
 }

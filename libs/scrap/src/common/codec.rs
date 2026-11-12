@@ -154,17 +154,27 @@ impl Encoder {
             }),
 
             #[cfg(feature = "hwcodec")]
-            EncoderCfg::HWRAM(_) => match HwRamEncoder::new(config, i444) {
-                Ok(hw) => Ok(Encoder {
-                    codec: Box::new(hw),
-                }),
-                Err(e) => {
-                    log::error!("new hw encoder failed: {e:?}, clear config");
-                    HwCodecConfig::clear(false, true);
-                    *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
-                    Err(e)
+            EncoderCfg::HWRAM(ref hw_config) => {
+                #[cfg(target_os = "macos")]
+                let encoder_name = hw_config.name.clone();
+                #[cfg(not(target_os = "macos"))]
+                let _ = hw_config;
+                match HwRamEncoder::new(config, i444) {
+                    Ok(hw) => Ok(Encoder {
+                        codec: Box::new(hw),
+                    }),
+                    Err(e) => {
+                        log::error!("new hw encoder failed: {e:?}");
+                        #[cfg(target_os = "macos")]
+                        if HwRamEncoder::defer_videotoolbox_encoder(&encoder_name) {
+                            return Err(e);
+                        }
+                        HwCodecConfig::clear(false, true);
+                        *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
+                        Err(e)
+                    }
                 }
-            },
+            }
             #[cfg(feature = "vram")]
             EncoderCfg::VRAM(_) => match VRamEncoder::new(config, i444) {
                 Ok(tex) => Ok(Encoder {

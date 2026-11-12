@@ -5749,6 +5749,8 @@ impl Connection {
 
     #[cfg(feature = "hwcodec")]
     fn update_supported_encoding(&mut self) {
+        #[cfg(target_os = "macos")]
+        scrap::hwcodec::HwRamEncoder::refresh_videotoolbox_encoders();
         let Some(last) = &self.last_supported_encoding else {
             return;
         };
