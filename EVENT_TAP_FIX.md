@@ -36,7 +36,7 @@ Run the **Build macOS Event Tap and focus fix** workflow from GitHub Actions. It
 Intel `x86_64` application with the same Rust, Flutter and vcpkg versions pinned
 by RustDesk 1.5.0, applies an ad-hoc signature, creates a DMG and uploads:
 
-* `RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg`
+* `RustDesk-H264PendingFix-1.5.3-x86_64.dmg`
 * `SHA256SUMS.txt`
 
 The build is intentionally not notarized. It is intended only for installation
@@ -47,7 +47,7 @@ on the owner's Mac.
 Run:
 
 ```bash
-./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-EventTapFocusFix-1.5.0-x86_64.dmg
+./scripts/install-eventtapfix-macos.sh /path/to/RustDesk-H264PendingFix-1.5.3-x86_64.dmg
 ```
 
 The script verifies the checksum, architecture, embedded recovery log marker

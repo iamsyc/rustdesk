@@ -7,6 +7,7 @@ permissions:
   contents: read
 
 env:
+  VERSION: "1.5.3"
   CARGO_EXPAND_VERSION: "1.0.95"
   FLUTTER_RUST_BRIDGE_VERSION: "1.80.1"
   BRIDGE_RUST_VERSION: "1.75"
@@ -41,7 +42,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: eventtapfix-bridge-1.5.1
+          prefix-key: eventtapfix-bridge-${{ env.VERSION }}
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2
@@ -164,7 +165,7 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
-          prefix-key: h264-macos-${{ matrix.package_arch }}-1.5.1
+          prefix-key: h264-macos-${{ matrix.package_arch }}-${{ env.VERSION }}
 
       - name: Restore bridge
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -201,7 +202,7 @@ jobs:
           for line in open("h264-test-build.json"):
               item = json.loads(line)
               if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "macos_h264" and item.get("executable"):
-                  shutil.copy2(item["executable"], "RustDesk-H264PendingFix-1.5.1-${{ matrix.package_arch }}.hardware-test")
+                  shutil.copy2(item["executable"], "RustDesk-H264PendingFix-${{ env.VERSION }}-${{ matrix.package_arch }}.hardware-test")
                   break
           else:
               raise SystemExit("No hardware regression test executable was produced")
@@ -220,7 +221,7 @@ jobs:
           LIB="${APP}/Contents/Frameworks/liblibrustdesk.dylib"
           test -d "${APP}"
           test -f "${LIB}"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")" = "1.5.1"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")" = "${VERSION}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${APP}/Contents/Info.plist")" = "15.8"
           ARCHS="$(lipo -archs "${LIB}")"
           [[ " ${ARCHS} " == *" ${{ matrix.arch }} "* ]]
@@ -233,7 +234,7 @@ jobs:
       - name: Package DMG
         run: |
           APP="flutter/build/macos/Build/Products/Release/RustDesk.app"
-          DMG="RustDesk-H264PendingFix-1.5.1-${{ matrix.package_arch }}.dmg"
+          DMG="RustDesk-H264PendingFix-${{ env.VERSION }}-${{ matrix.package_arch }}.dmg"
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "${CREATE_DMG}")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "${CREATE_DMG}"
@@ -248,9 +249,9 @@ jobs:
       - name: Upload patched DMG
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: RustDesk-H264PendingFix-1.5.1-${{ matrix.package_arch }}
+          name: RustDesk-H264PendingFix-${{ env.VERSION }}-${{ matrix.package_arch }}
           path: |
-            RustDesk-H264PendingFix-1.5.1-${{ matrix.package_arch }}.dmg
+            RustDesk-H264PendingFix-${{ env.VERSION }}-${{ matrix.package_arch }}.dmg
             SHA256SUMS.txt
-            RustDesk-H264PendingFix-1.5.1-${{ matrix.package_arch }}.hardware-test
+            RustDesk-H264PendingFix-${{ env.VERSION }}-${{ matrix.package_arch }}.hardware-test
           retention-days: 14

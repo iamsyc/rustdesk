@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+VERSION="1.5.3"
+
 if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 /path/to/RustDesk-EventTapFocusFix-1.5.1-x86_64.dmg" >&2
+  echo "Usage: $0 /path/to/RustDesk-H264PendingFix-${VERSION}-x86_64.dmg" >&2
   exit 64
 fi
 
@@ -50,11 +52,18 @@ fi
 
 SOURCE_BIN="${SOURCE_APP}/Contents/Frameworks/liblibrustdesk.dylib"
 ARCHS="$(lipo -archs "${SOURCE_BIN}")"
-[[ " ${ARCHS} " == *" x86_64 "* ]]
+if [[ " ${ARCHS} " != *" x86_64 "* ]]; then
+  echo "The DMG does not contain an Intel RustDesk build." >&2
+  exit 65
+fi
 grep -aFq "macOS keyboard event tap was disabled" "${SOURCE_BIN}"
 grep -aFq "native Event Tap remains armed" "${SOURCE_BIN}"
 grep -aFq "ignoring unsupported macOS input source" "${SOURCE_BIN}"
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_APP}/Contents/Info.plist")" == "1.5.1" ]]
+SOURCE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${SOURCE_APP}/Contents/Info.plist")"
+if [[ "${SOURCE_VERSION}" != "${VERSION}" ]]; then
+  echo "Expected RustDesk ${VERSION}, found ${SOURCE_VERSION}." >&2
+  exit 65
+fi
 codesign --verify --deep --strict --verbose=2 "${SOURCE_APP}"
 
 echo "Verified patched x86_64 RustDesk application."
