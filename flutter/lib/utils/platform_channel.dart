@@ -37,6 +37,11 @@ class RdPlatformChannel {
         .invokeMethod("setWindowTheme", {"themeName": theme.name});
   }
 
+  Future<void> setRemoteKeyboardSession(String? sessionId) {
+    assert(isMacOS);
+    return _hostMethodChannel.invokeMethod('setRemoteKeyboardSession', sessionId);
+  }
+
   /// Terminate .app manually.
   Future<void> terminate() {
     assert(isMacOS);

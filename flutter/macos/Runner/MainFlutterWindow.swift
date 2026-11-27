@@ -19,6 +19,18 @@ import window_manager
 import window_size
 import texture_rgba_renderer
 
+private var remoteKeyboardSessionKey: UInt8 = 0
+
+extension NSWindow {
+    @objc func rustDeskRemoteKeyboardSession() -> NSString? {
+        objc_getAssociatedObject(self, &remoteKeyboardSessionKey) as? NSString
+    }
+
+    fileprivate func setRustDeskRemoteKeyboardSession(_ session: NSString?) {
+        objc_setAssociatedObject(self, &remoteKeyboardSessionKey, session, .OBJC_ASSOCIATION_COPY)
+    }
+}
+
 // Global state for relative mouse mode
 // All properties and methods must be accessed on the main thread since they
 // interact with NSEvent monitors, CoreGraphics APIs, and Flutter channels.
@@ -212,6 +224,9 @@ class MainFlutterWindow: NSWindow {
                     self.setWindowInterfaceMode(window: window,themeName: themeName ?? "light")
                     result(nil)
                     break;
+                case "setRemoteKeyboardSession":
+                    registrar.view?.window?.setRustDeskRemoteKeyboardSession(call.arguments as? NSString)
+                    result(nil)
                 case "terminate":
                     NSApplication.shared.terminate(self)
                     result(nil)

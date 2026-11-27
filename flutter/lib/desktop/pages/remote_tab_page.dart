@@ -16,6 +16,7 @@ import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
     as mod_menu;
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:bot_toast/bot_toast.dart';
@@ -65,6 +66,15 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     tryMoveToScreenAndSetFullscreen(screenRect);
     if (peerId != null) {
       ConnectionTypeState.init(peerId!);
+      if (isMacOS) {
+        tabController.onKeyboardPageChanged = (id) {
+          final page = id == null ? null : tabController.widget(id);
+          final session = page is RemotePage ? page.ffi.sessionId : null;
+          if (session != null) bind.setCurSessionId(sessionId: session);
+          return RdPlatformChannel.instance
+              .setRemoteKeyboardSession(session?.toString());
+        };
+      }
       tabController.onSelected = (id) {
         final remotePage = tabController.widget(id);
         if (remotePage is RemotePage) {

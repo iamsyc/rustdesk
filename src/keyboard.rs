@@ -690,10 +690,93 @@ fn should_block_relative_mouse_shortcut(key: Key, is_press: bool) -> bool {
     false
 }
 
+#[cfg(all(target_os = "macos", feature = "flutter"))]
+fn macos_session_accepts_keyboard(session: &flutter::FlutterSession) -> bool {
+    let connected = session.connection_round_state.lock().unwrap().is_connected();
+    connected && session.lc.read().unwrap().peer_info.is_some()
+}
+
+#[cfg(all(target_os = "macos", feature = "flutter"))]
+#[derive(Default)]
+struct MacosKeyboardCapture {
+    owner: Option<(SessionID, flutter::FlutterSession)>,
+    held_after_leave: std::collections::HashSet<Key>,
+}
+
+#[cfg(all(target_os = "macos", feature = "flutter"))]
+impl MacosKeyboardCapture {
+    fn update_owner(&mut self, next: Option<&(SessionID, flutter::FlutterSession)>) {
+        if self.owner.as_ref().map(|(id, _)| id) == next.map(|(id, _)| id) {
+            return;
+        }
+        if let Some((_, previous)) = self.owner.take() {
+            let mut releases = take_remote_keys();
+            self.held_after_leave
+                .extend(shortcuts::cancel_macos_capture(&mut releases));
+            self.held_after_leave.extend(releases.keys().copied());
+            if EXIT_SHORTCUT_KEY_DOWN.swap(false, Ordering::SeqCst) {
+                self.held_after_leave.insert(Key::KeyG);
+            }
+
+            if macos_session_accepts_keyboard(&previous) {
+                let peer = previous.peer_platform().to_lowercase();
+                let mode = get_keyboard_mode_enum(&previous.get_keyboard_mode());
+                let mut releases: Vec<_> = releases.into_iter().collect();
+                releases.sort_by_key(|(key, _)| is_modifier(key));
+                for (key, mut event) in releases {
+                    event.event_type = EventType::KeyRelease(key);
+                    for packet in event_to_key_events(peer.clone(), &event, mode, None) {
+                        previous.send_key_event(&packet);
+                    }
+                }
+            }
+            for down in MODIFIERS_STATE.lock().unwrap().values_mut() {
+                *down = false;
+            }
+        }
+        self.owner = next.cloned();
+    }
+
+    fn is_held_from_previous_session(&mut self, key: Key, is_press: bool) -> bool {
+        if is_press {
+            self.held_after_leave.contains(&key)
+        } else {
+            self.held_after_leave.remove(&key)
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "flutter", test))]
+mod macos_keyboard_tests {
+    use super::*;
+
+    #[test]
+    fn macos_keyboard_stays_local_until_authentication_completes() {
+        let session = flutter::FlutterSession::default();
+        let round = session.connection_round_state.lock().unwrap().new_round();
+        session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_connected();
+        assert!(!macos_session_accepts_keyboard(&session));
+        session.lc.write().unwrap().peer_info = Some(PeerInfo::new());
+        assert!(macos_session_accepts_keyboard(&session));
+        session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_disconnected(round);
+        assert!(!macos_session_accepts_keyboard(&session));
+    }
+}
+
 fn start_grab_loop() {
     std::env::set_var("KEYBOARD_ONLY", "y");
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     std::thread::spawn(move || {
+        #[cfg(all(target_os = "macos", feature = "flutter"))]
+        let capture = std::cell::RefCell::new(MacosKeyboardCapture::default());
         let try_handle_keyboard = move |event: Event, key: Key, is_press: bool| -> Option<Event> {
             // fix #2211：CAPS LOCK don't work
             if key == Key::CapsLock || key == Key::NumLock {
@@ -703,18 +786,41 @@ fn start_grab_loop() {
             let _scan_code = event.position_code;
             let _code = event.platform_code as KeyCode;
 
-            #[cfg(feature = "flutter")]
-            if should_block_relative_mouse_shortcut(key, is_press) {
-                return None;
-            }
-
-            let mut hooked = KEYBOARD_HOOKED.load(Ordering::SeqCst);
-            #[cfg(target_os = "macos")]
+            let hooked = KEYBOARD_HOOKED.load(Ordering::SeqCst);
+            #[cfg(all(target_os = "macos", not(feature = "flutter")))]
+            let hooked = hooked && crate::platform::macos::is_remote_desktop_key_window();
+            #[cfg(all(target_os = "macos", feature = "flutter"))]
+            let session = if hooked {
+                crate::platform::macos::remote_keyboard_key_window_session().and_then(|id| {
+                    let session = flutter::sessions::get_session_by_session_id(&id)?;
+                    macos_session_accepts_keyboard(&session).then_some((id, session))
+                })
+            } else {
+                None
+            };
+            #[cfg(all(target_os = "macos", feature = "flutter"))]
             {
-                // Never consume local keys when another application or a
-                // non-remote RustDesk window is frontmost, even if Flutter left
-                // a stale grab bit behind.
-                hooked &= crate::platform::macos::is_remote_desktop_key_window();
+                let mut capture = capture.borrow_mut();
+                capture.update_owner(session.as_ref());
+                if capture.is_held_from_previous_session(key, is_press) {
+                    if !is_press && _code == rdev::kVK_Option {
+                        unsafe { IS_LEFT_OPTION_DOWN = false };
+                    }
+                    return (!is_press).then_some(event);
+                }
+            }
+            #[cfg(all(target_os = "macos", feature = "flutter"))]
+            let hooked = session.is_some();
+
+            #[cfg(all(target_os = "macos", feature = "flutter"))]
+            let can_exit_relative_mouse_mode = session
+                .as_ref()
+                .is_some_and(|(id, _)| *id == flutter::get_cur_session_id());
+            #[cfg(all(target_os = "windows", feature = "flutter"))]
+            let can_exit_relative_mouse_mode = hooked;
+            #[cfg(feature = "flutter")]
+            if can_exit_relative_mouse_mode && should_block_relative_mouse_shortcut(key, is_press) {
+                return None;
             }
             log::trace!(
                 "[keyboard-diag] capture direction={} hooked={}",
@@ -722,7 +828,18 @@ fn start_grab_loop() {
                 hooked
             );
             let res = if hooked {
+                #[cfg(not(all(target_os = "macos", feature = "flutter")))]
                 client::process_event(&get_keyboard_mode(), &event, None);
+                #[cfg(all(target_os = "macos", feature = "flutter"))]
+                if let Some((id, session)) = session {
+                    client::process_event_with_session(
+                        &session.get_keyboard_mode(),
+                        &event,
+                        None,
+                        &session,
+                        id,
+                    );
+                }
                 if is_press {
                     None
                 } else {

@@ -153,34 +153,58 @@ pub fn is_can_screen_recording(prompt: bool) -> bool {
     autoreleasepool(|| unsafe_is_can_screen_recording(prompt))
 }
 
-/// Returns whether the active AppKit key window is a RustDesk remote-desktop
-/// window. Flutter focus/lifecycle callbacks can flap while this native window
-/// remains active, so native Event Tap input uses this as the authoritative
-/// macOS boundary.
+unsafe fn active_key_window() -> Option<id> {
+    let app = NSApp();
+    if app.is_null() {
+        return None;
+    }
+    let active: BOOL = msg_send![app, isActive];
+    if active != YES {
+        return None;
+    }
+    let window: id = msg_send![app, keyWindow];
+    (!window.is_null()).then_some(window)
+}
+
+#[cfg(not(feature = "flutter"))]
 pub fn is_remote_desktop_key_window() -> bool {
     autoreleasepool(|| unsafe {
-        let app = NSApp();
-        if app.is_null() {
+        let Some(window) = active_key_window() else {
             return false;
-        }
-        let active: BOOL = msg_send![app, isActive];
-        if active != YES {
-            return false;
-        }
-        let window: id = msg_send![app, keyWindow];
-        if window.is_null() {
-            return false;
-        }
+        };
         let title: id = msg_send![window, title];
         if title.is_null() {
             return false;
         }
-        let title_ptr: *const std::os::raw::c_char = msg_send![title, UTF8String];
-        if title_ptr.is_null() {
+        let title: *const std::os::raw::c_char = msg_send![title, UTF8String];
+        if title.is_null() {
             return false;
         }
-        let title = std::ffi::CStr::from_ptr(title_ptr).to_string_lossy();
+        let title = std::ffi::CStr::from_ptr(title).to_string_lossy();
         title.contains("Remote Desktop") && title.ends_with("RustDesk")
+    })
+}
+
+/// Resolve the selected tab from the native key window, independently of
+/// asynchronous Flutter focus notifications and user-facing window titles.
+#[cfg(feature = "flutter")]
+pub fn remote_keyboard_key_window_session() -> Option<hbb_common::SessionID> {
+    autoreleasepool(|| unsafe {
+        let window = active_key_window()?;
+        let selector = sel!(rustDeskRemoteKeyboardSession);
+        let responds: BOOL = msg_send![window, respondsToSelector: selector];
+        if responds != YES {
+            return None;
+        }
+        let session: id = msg_send![window, rustDeskRemoteKeyboardSession];
+        if session.is_null() {
+            return None;
+        }
+        let session: *const std::os::raw::c_char = msg_send![session, UTF8String];
+        if session.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(session).to_str().ok()?.parse().ok()
     })
 }
 

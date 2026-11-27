@@ -421,6 +421,23 @@ pub fn clear_session_state(session_id: &hbb_common::SessionID) {
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "flutter"))]
+pub(super) fn cancel_macos_capture(
+    releases: &mut std::collections::HashMap<rdev::Key, rdev::Event>,
+) -> std::collections::HashSet<rdev::Key> {
+    let mut held = std::mem::take(&mut *FIRED_KEYS.lock().unwrap());
+    RELEASE_ACTIONS.lock().unwrap().clear();
+    // The native tap has one active owner. Previously released modifiers may
+    // already be listed under the next tab by transfer_released_modifiers().
+    for (_, modifiers) in RELEASED_MODIFIERS.lock().unwrap().drain() {
+        for key in modifiers.into_keys() {
+            releases.remove(&key);
+            held.insert(key);
+        }
+    }
+    held
+}
+
 /// Clear local state on focus loss when the shortcut already released the remote key.
 #[cfg(feature = "flutter")]
 pub(super) fn release_modifier_on_leave(key: rdev::Key) -> bool {
@@ -922,6 +939,72 @@ mod tests {
                 "USB HID {usage:#04x}"
             );
         }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "flutter"))]
+    #[test]
+    fn macos_capture_releases_old_keys_and_cancels_pending_shortcuts() {
+        use crate::client::Data;
+        use crate::flutter::FlutterSession;
+        use super::super::{client, MacosKeyboardCapture, MODIFIERS_STATE};
+        use base::message_proto::{message, PeerInfo};
+        use rdev::Key;
+
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_fired_keys();
+        clear_session_state(&SID_A);
+        clear_session_state(&SID_B);
+        let old = FlutterSession::default();
+        let (tx, mut rx) = hbb_common::tokio::sync::mpsc::unbounded_channel();
+        *old.sender.write().unwrap() = Some(tx);
+        old.connection_round_state.lock().unwrap().set_connected();
+        {
+            let mut config = old.lc.write().unwrap();
+            config.peer_info = Some(PeerInfo::new());
+            config.version = hbb_common::get_version_number("1.5.3");
+        }
+        let owner = (SID_A, old);
+        let mut capture = MacosKeyboardCapture::default();
+        capture.update_owner(Some(&owner));
+        client::process_event_with_session(
+            &owner.1.get_keyboard_mode(),
+            &make_press(Key::ShiftLeft),
+            None,
+            &owner.1,
+            SID_A,
+        );
+        let Data::Message(down) = rx.try_recv().expect("modifier key down") else {
+            panic!("expected a keyboard packet");
+        };
+        let Some(message::Union::KeyEvent(down)) = down.union else {
+            panic!("expected a key down event");
+        };
+        assert!(down.down);
+        capture.update_owner(None);
+        let Data::Message(up) = rx.try_recv().expect("old session's modifier key up") else {
+            panic!("expected a keyboard packet");
+        };
+        let Some(message::Union::KeyEvent(up)) = up.union else {
+            panic!("expected a key up event");
+        };
+        assert!(!up.down);
+        assert_eq!(up.chr(), down.chr());
+        assert!(!MODIFIERS_STATE.lock().unwrap()[&Key::ShiftLeft]);
+        assert!(capture.is_held_from_previous_session(Key::ShiftLeft, false));
+        assert!(rx.try_recv().is_err());
+
+        let chord = enable_defaults_and_hold_chord();
+        capture.update_owner(Some(&owner));
+        assert!(try_dispatch(
+            Some(&SID_A), &make_press(Key::KeyC), "map", || "windows".into(), |_| {},
+        ));
+        assert!(RELEASE_ACTIONS.lock().unwrap().contains_key(&Key::KeyC));
+        capture.update_owner(None);
+        assert!(capture.is_held_from_previous_session(Key::KeyC, false));
+        assert!(!RELEASE_ACTIONS.lock().unwrap().contains_key(&Key::KeyC));
+        assert!(!fired_keys().contains(&Key::KeyC));
+        release_chord(chord);
+        reset_fired_keys();
     }
 
     /// Serializes the tests that write the global `CACHE`.

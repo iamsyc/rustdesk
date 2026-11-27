@@ -99,6 +99,7 @@ class DesktopTabController {
   /// index, key
   Function(int, String)? onRemoved;
   Function(String)? onSelected;
+  Future<void> Function(String?)? onKeyboardPageChanged;
   Future<void> Function()? onCloseWindow;
 
   DesktopTabController(
@@ -133,6 +134,20 @@ class DesktopTabController {
     if (!isDesktop) return;
     final len = state.value.tabs.length;
     if (index < 0 || index > len - 1) return;
+    final updateKeyboardPage = onKeyboardPageChanged;
+    if (updateKeyboardPage == null) {
+      _remove(index);
+    } else {
+      final tab = state.value.tabs[index];
+      unawaited(updateKeyboardPage(null).then((_) {
+        final currentIndex = state.value.tabs.indexOf(tab);
+        if (currentIndex >= 0) _remove(currentIndex);
+      }));
+    }
+  }
+
+  void _remove(int index) {
+    final len = state.value.tabs.length;
     final key = state.value.tabs[index].key;
     final currentSelected = state.value.selected;
     int toIndex = 0;
@@ -155,10 +170,25 @@ class DesktopTabController {
     }
     state.update((val) {
       if (val != null) {
+        final updateKeyboardPage = onKeyboardPageChanged;
+        final keyboardPaused = updateKeyboardPage?.call(null);
+        final tab = index < val.tabs.length ? val.tabs[index] : null;
         val.selected = index;
-        Future.delayed(Duration(milliseconds: 100), (() {
+        Future.delayed(Duration(milliseconds: 100), (() async {
+          if (keyboardPaused != null) {
+            await keyboardPaused;
+            if (!_isSelectedPage(val, index, tab)) return;
+          }
           if (val.pageController.hasClients) {
             val.pageController.jumpToPage(index);
+            if (updateKeyboardPage != null && tab != null) {
+              await WidgetsBinding.instance.endOfFrame;
+              if (_isSelectedPage(val, index, tab) &&
+                  val.pageController.hasClients &&
+                  val.pageController.page == index) {
+                await updateKeyboardPage(tab.key);
+              }
+            }
           }
           val.scrollController.itemCount = val.tabs.length;
           if (val.scrollController.hasClients &&
@@ -178,6 +208,11 @@ class DesktopTabController {
     }
     return true;
   }
+
+  bool _isSelectedPage(DesktopTabState val, int index, TabInfo? tab) =>
+      val.selected == index &&
+      index < val.tabs.length &&
+      identical(val.tabs[index], tab);
 
   bool jumpToByKey(String key, {bool callOnSelected = true}) =>
       jumpTo(state.value.tabs.indexWhere((tab) => tab.key == key),
@@ -212,6 +247,8 @@ class DesktopTabController {
   }
 
   void clear() {
+    final updateKeyboardPage = onKeyboardPageChanged;
+    if (updateKeyboardPage != null) unawaited(updateKeyboardPage(null));
     state.value.tabs.clear();
     state.refresh();
   }
